@@ -16,7 +16,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("pyxfer.client")
+log = logging.getLogger("hydrangea.client")
 
 
 async def handle_server(
@@ -250,7 +250,7 @@ art = r"""
 
 
 async def amain():
-    ap = argparse.ArgumentParser(description="pyxfer client")
+    ap = argparse.ArgumentParser(description="Hydrangea client")
     ap.add_argument("--server", required=True, help="Server hostname/IP")
     ap.add_argument(
         "--port",

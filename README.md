@@ -1,9 +1,6 @@
 # Hydrangea C2
 
-Lightweight, Python/asyncio command-and-control for **managed endpoints**. Built for labs, internal automation, and education — not for abuse.
-
 ```
-
    ▄█    █▄    ▄██   ▄   ████████▄     ▄████████    ▄████████ ███▄▄▄▄      ▄██████▄     ▄████████    ▄████████ 
   ███    ███   ███   ██▄ ███   ▀███   ███    ███   ███    ███ ███▀▀▀██▄   ███    ███   ███    ███   ███    ███ 
   ███    ███   ███▄▄▄███ ███    ███   ███    ███   ███    ███ ███   ███   ███    █▀    ███    █▀    ███    ███ 
@@ -14,7 +11,7 @@ Lightweight, Python/asyncio command-and-control for **managed endpoints**. Built
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀  
                                       ███    ███                                                               
 
-              Hydrangea C2 •  V1.1
+              Hydrangea C2 •  V1.2
 ```
 
 ---
@@ -25,6 +22,9 @@ Lightweight, Python/asyncio command-and-control for **managed endpoints**. Built
 * [Architecture](#architecture)
 * [Install & Run](#install--run)
 * [Controller UX](#controller-ux)
+  * [Classic CLI](#classic-cli)
+  * [REPL](#repl)
+* [Agent builder (Go)](#agent-builder-go)
 * [Orders & Methods](#orders--methods)
 
   * [Admin actions](#admin-actions)
@@ -44,8 +44,8 @@ Lightweight, Python/asyncio command-and-control for **managed endpoints**. Built
 Hydrangea C2 has three parts:
 
 * **Server** — listens on multiple ports, tracks connected clients, relays orders, stores incoming files.
-* **Client** — registers to the server, executes orders (list, file xfer, exec, session info).
-* **Controller (CLI)** — sends admin actions and renders results with a clean TUI.
+* **Client (Go)** — registers to the server, executes orders (list, file xfer, exec, session info).
+* **Controller (CLI)** — sends admin actions and renders results with a clean TUI / REPL.
 
 > Tip: Use on **trusted networks/hosts** with explicit authorization.
 
@@ -54,8 +54,8 @@ Hydrangea C2 has three parts:
 ## Architecture
 
 ```
-[ Controller (serverctl) ]  <--ADMIN RPC-->  [ Server ]  ==orders=>  [ Client(s) ]
-                                                     <==results==
+[ Controller (serverctl) ]  <--ADMIN RPC-->  [ Server ]  ===orders==>   [ Client(s) ]
+                                                         <==results==
 ```
 
 * Transport is plain TCP using a compact **length-prefixed JSON header + binary payload** frame.
@@ -66,19 +66,23 @@ Hydrangea C2 has three parts:
 
 ## Install & Run
 
-Requires Python **3.10+**.
+Requires Python **3.10+** (server + controller).
+For building Go clients, requires Go **1.21+**.
 
 ```bash
-# Server (multi-port)
+# Server (single or multi-port)
 python server.py --ports 9000 9001 --storage ./server_storage --auth-token supersecret
 
-# Client (relative paths base)
-python client.py --server 127.0.0.1 --port 9000 --client-id laptop1 \
-  --auth-token supersecret --root ./client_root
+# Build Go agents (see "Agent builder (Go)" below)
+python serverctl.py --port 9000 --auth-token supersecret \
+  build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
 
-# Client (allow absolute paths on the machine)
-python client.py --server 127.0.0.1 --port 9000 --client-id laptop1 \
-  --auth-token supersecret --root /
+# Run a built Go client
+./dist/hydrangea-client-linux-amd64 \
+  --server 127.0.0.1 --port 9000 --auth-token supersecret --client-id laptop1
+
+# Start server from controller
+python serverctl.py --port 9000 --auth-token supersecret --start-srv
 ```
 
 > The **auth token** must match across server, clients, and controller.
@@ -87,19 +91,11 @@ python client.py --server 127.0.0.1 --port 9000 --client-id laptop1 \
 
 ## Controller UX
 
-Hydrangea’s controller prints **clean, human-friendly** output with tags:
-
-* **\[+]** success **\[\~]** queued/pending **\[\*]** info **\[!]** error
-* ASCII banner and colors can be disabled: `--no-banner`, `--no-color`, or tone down with `--quiet`.
-
-Examples:
+### Classic CLI
 
 ```bash
 # Connected clients
 python serverctl.py --port 9000 --auth-token supersecret clients
-# [+] Connected clients: 2
-#   • laptop1
-#   • lab-vm
 
 # Directory listing (waits and renders a table)
 python serverctl.py --port 9000 --auth-token supersecret \
@@ -114,6 +110,83 @@ python serverctl.py --port 9000 --auth-token supersecret \
   session --client laptop1
 ```
 
+### REPL
+
+You can run the controller as an interactive console, and **pin** a client context so you don’t have to pass `--client` every time.
+
+```bash
+# Start REPL (you can also just omit a subcommand)
+python serverctl.py --port 9000 --auth-token supersecret --repl
+```
+
+Inside the REPL:
+
+```
+>> clients
+>> use laptop1           # sets active client context
+>> exec --command "uname -a"
+>> list --path / --wait
+>> unuse                 # clears active context
+>> use laptop3
+>> session
+```
+
+* `use <client_id>` sets the active client.
+* `unuse` clears it (or `unuse <client_id>` only clears if it matches).
+* In REPL, `--client` becomes **optional**; commands will use the active client if provided.
+
+---
+
+## Agent builder (Go)
+
+Hydrangea ships a **builder** in the controller to compile the Go client located at `./client/go/` and **embed server details** at build time.
+
+**Requirements**
+
+* Go **>= 1.21**
+* Source files present at:
+  * `client/go/main.go`
+  * `client/go/go.mod`
+
+**Build command**
+
+```bash
+# Build Linux + Windows agents (amd64) with embedded server host/port/token
+python serverctl.py --port 9000 --auth-token supersecret \
+  build-client --server-host 192.168.1.10 --server-port 9000 \
+  --build-auth-token supersecret --out ./dist
+
+# REPL
+>> build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
+```
+
+Options:
+
+* `--server-host` (defaults to controller `--host` if omitted)
+* `--server-port` (defaults to controller `--port`)
+* `--build-auth-token` (defaults to controller `--auth-token`)
+* `--client-id` (optional fixed ID; otherwise client uses its hostname or code default)
+* `--os` (`linux`, `windows`; repeatable; default: both)
+* `--arch` (`amd64`, `arm64`; default: `amd64`)
+* `--out` output directory (default: `./dist`)
+
+**How embedding works**
+
+The builder uses Go’s `-ldflags -X` to set variables expected by the client code:
+
+* `main.DefaultServerHost`
+* `main.DefaultServerPort`
+* `main.DefaultAuthToken`
+* `main.DefaultClientID`
+
+Your Go client should read these as defaults on startup (and may allow runtime flags like `--server`, `--port`, etc., to override).
+
+**Output binaries**
+
+* `dist/hydrangea-client-linux-amd64`
+* `dist/hydrangea-client-windows-amd64.exe`
+* (and/or `arm64` variants if requested)
+
 ---
 
 ## Orders & Methods
@@ -124,76 +197,40 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn’t im
 
 Run from the controller (`serverctl.py`):
 
-* `clients`
-  List connected client IDs.
-
-* `ping --client <id>`
-  Send a ping to a client (server doesn’t wait for a reply).
-
-* `list --client <id> [--path <p>] [--wait] [--timeout <sec>]`
-  Request a directory listing on the client.
+* `clients` — List connected client IDs.
+* `ping --client <id>` — Send a ping to a client (server doesn’t wait for a reply).
+* `list --client <id> [--path <p>] [--wait] [--timeout <sec>]` — Request a directory listing on the client.
 
   * With `--wait`, the controller blocks and renders the result.
   * Without `--wait`, the order is queued; result is logged server-side.
-
-* `pull --client <id> --src <client_path> [--dest <server_save_as>]`
-  Ask the client to **send a file to the server**.
+* `pull --client <id> --src <client_path> --dest <server_path>` — Ask the client to **send a file to the server**.
 
   * If `--dest` is **absolute**, the server writes exactly there.
-  * If `--dest` is relative or omitted, it saves under `server_storage/<client_id>/`.
+  * If `--dest` is relative, it saves under `server_storage/<client_id>/`.
+* `push --client <id> --src <local_path> --dest <client_path>` — Send a local file **from the controller machine** to the client.
+* `exec --client <id> --command "<str|json list>" [--shell] [--cwd <client_path>] [--timeout <sec>]` — Execute a system command on the client and return `rc/stdout/stderr`.
+* `session --client <id> [--timeout <sec>]` — Fetch basic session info (platform, system, release, machine, runtime, pid, user, cwd, hostname, root base, interpreter path).
+* `build-client [options]` — **Compile Go clients** from `./client/go` and embed server details (see [Agent builder (Go)](#agent-builder-go)).
 
-* `push --client <id> --src <local_path> --dest <client_path>`
-  Send a local file **from the controller machine** to the client.
-
-* `exec --client <id> --command "<str|json list>" [--shell] [--cwd <client_path>] [--timeout <sec>]`
-  Execute a system command on the client and return `rc`, `stdout`, `stderr`.
-
-  * `--shell` to run via shell; otherwise pass a JSON list for exact argv (e.g., `["ls","-la"]`).
-  * `--cwd` sets the working directory on the client (absolute or relative).
-
-* `session --client <id> [--timeout <sec>]`
-  Fetch basic session info (platform, system, release, machine, python, pid, user, cwd, hostname, root base, interpreter path).
+> **REPL-only meta:** `use <id>` / `unuse` to manage active client context (no network call; it only changes REPL behavior).
 
 ### Client orders (server → client)
 
-* `PING`
-  Health check. Client replies `PONG`.
-
-* `LIST_DIR {path, req_id?}`
-  List contents of a directory.
-
-* `PULL_FILE {src_path, save_as}`
-  Client reads `src_path` and ships the bytes to the server.
-
-* `PUSH_FILE {dest_path, src_name} + payload`
-  Server sends file bytes; client writes them to `dest_path`.
-
-* `EXEC {cmd, shell, cwd, timeout, req_id}`
-  Run a program and capture output.
-
-* `SESSION_INFO {req_id}`
-  Gather basic environment details.
+* `PING` — Health check. Client replies `PONG`.
+* `LIST_DIR {path, req_id?}` — List contents of a directory.
+* `PULL_FILE {src_path, save_as}` — Client reads `src_path` and ships the bytes to the server.
+* `PUSH_FILE {dest_path, src_name} + payload` — Server sends file bytes; client writes them to `dest_path`.
+* `EXEC {cmd, shell, cwd, timeout, req_id}` — Run a program and capture output.
+* `SESSION_INFO {req_id}` — Gather basic environment details.
 
 ### Client responses (client → server)
 
-* `PONG`
-  Response to `PING`.
-
-* `RESULT_LIST_DIR {path, entries_count, req_id?} + payload(JSON)`
-  Payload is a JSON array with entries like:
-  `{"name":"...", "is_dir":true|false, "bytes":123, "mtime":1710000000}`
-
-* `FILE {src_path, save_as, sha256} + payload(bytes)`
-  Raw file bytes in payload.
-
-* `RESULT_EXEC {rc, req_id} + payload(JSON)`
-  Payload JSON: `{"rc": int|null, "stdout": "...", "stderr": "..."}`
-
-* `RESULT_SESSION_INFO {req_id} + payload(JSON)`
-  Payload JSON: session info fields (see `session` action).
-
-* `LOG {message}`
-  Free-form informational message.
+* `PONG` — Response to `PING`.
+* `RESULT_LIST_DIR {path, entries_count, req_id?} + payload(JSON)` — Payload: array of entries `{name,is_dir,bytes,mtime}`.
+* `FILE {src_path, save_as, sha256} + payload(bytes)` — Raw file bytes in payload.
+* `RESULT_EXEC {rc, req_id} + payload(JSON)` — Payload: `{"rc": int|null, "stdout": "...", "stderr": "..."}`.
+* `RESULT_SESSION_INFO {req_id} + payload(JSON)` — Payload: session info fields.
+* `LOG {message}` — Free-form informational message.
 
 ---
 
@@ -219,13 +256,12 @@ bytes      payload (optional; exactly header["size"] bytes)
   * Default save location for pulled files: `server_storage/<client_id>/`.
   * If a **destination is absolute** (e.g., `/tmp/out.bin`), the file is written **exactly there** on the server host.
 
-* **Client side**
+* **Client side (Go)**
 
-  * `--root` defines the base for **relative** paths.
-  * **Absolute paths are allowed** (e.g., `/etc/hosts`) so you can operate on the full filesystem when intended.
-  * The client creates parent directories when pushing to `dest_path`.
+  * The client allows absolute paths (e.g., `/etc/hosts`) and can also resolve **relative** paths against its configured root base (see your client’s flags/implementation).
+  * When pushing, the client creates parent directories for the destination file if needed.
 
-> Use absolute paths sparingly and only where appropriate; they bypass the relative base.
+> Use absolute paths sparingly and only where appropriate.
 
 ---
 
@@ -242,20 +278,12 @@ bytes      payload (optional; exactly header["size"] bytes)
 
 ## Troubleshooting
 
-* `unknown_target`
-  The client ID isn’t connected. Run `clients` and check the ID spelling.
-
-* `Path traversal detected` (server)
-  Returned file tried to escape the relative save area. Use an **absolute** `--dest` or keep it relative.
-
-* No output from `exec`
-  Use `--shell` if you passed a single command string that relies on shell features; otherwise pass a JSON list.
-
-* Listing errors like `No such file or directory`
-  Verify the path exists on the client and that the client process has permissions.
-
-* Timeouts
-  Increase `--timeout`, verify connectivity and client load.
+* **`unknown_target`** — The client ID isn’t connected. Run `clients` and check the spelling.
+* **`Path traversal detected` (server)** — The target path would escape the allowed area. Use an **absolute** `--dest` or keep it relative under the client’s area.
+* **No output from `exec`** — Use `--shell` if you passed a single command string that relies on shell features; otherwise pass a JSON list.
+* **Listing errors like `No such file or directory`** — Verify the path exists and the client has permissions.
+* **Timeouts** — Increase `--timeout`, verify connectivity and client load.
+* **Go build fails** — Ensure Go ≥ 1.21 is on `PATH` and that `client/go/main.go` + `client/go/go.mod` exist.
 
 ---
 

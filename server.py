@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import argparse
 import asyncio
 import logging
@@ -11,7 +13,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
-log = logging.getLogger("pyxfer.server")
+log = logging.getLogger("hydrangea.server")
 
 
 class ClientSession:
@@ -424,7 +426,7 @@ art = r"""
 
 
 async def amain():
-    ap = argparse.ArgumentParser(description="pyxfer server")
+    ap = argparse.ArgumentParser(description="Hydrangea server")
     ap.add_argument("--host", default="0.0.0.0", help="Bind address")
     ap.add_argument(
         "--ports",
