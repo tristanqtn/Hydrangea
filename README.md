@@ -71,10 +71,10 @@ For building Go clients, requires Go **1.21+**.
 
 ```bash
 # Server (single or multi-port)
-python server.py --ports 9000 9001 --storage ./server_storage --auth-token supersecret
+python Hydrangea-server.py --ports 9000 9001 --storage ./server_storage --auth-token supersecret
 
 # Build Go agents (see "Agent builder (Go)" below)
-python serverctl.py --port 9000 --auth-token supersecret \
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
   build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
 
 # Run a built Go client
@@ -82,10 +82,20 @@ python serverctl.py --port 9000 --auth-token supersecret \
   --server 127.0.0.1 --port 9000 --auth-token supersecret --client-id laptop1
 
 # Start server from controller
-python serverctl.py --port 9000 --auth-token supersecret --start-srv
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret --start-srv
 ```
 
 > The **auth token** must match across server, clients, and controller.
+
+Lazy run : 
+
+```bash
+python3 Hydrangea-ctl.py --host 0.0.0.0 --port 9000 --auth-token supersecret --start-srv
+
+[...]
+
+>> build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
+
 
 ---
 
@@ -95,18 +105,18 @@ python serverctl.py --port 9000 --auth-token supersecret --start-srv
 
 ```bash
 # Connected clients
-python serverctl.py --port 9000 --auth-token supersecret clients
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret clients
 
 # Directory listing (waits and renders a table)
-python serverctl.py --port 9000 --auth-token supersecret \
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
   list --client laptop1 --path /var/log --wait
 
 # Remote exec (shows stdout/stderr blocks)
-python serverctl.py --port 9000 --auth-token supersecret \
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
   exec --client laptop1 --command "uname -a" --shell
 
 # Session info (OS/user/cwd/host)
-python serverctl.py --port 9000 --auth-token supersecret \
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
   session --client laptop1
 ```
 
@@ -116,7 +126,7 @@ You can run the controller as an interactive console, and **pin** a client conte
 
 ```bash
 # Start REPL (you can also just omit a subcommand)
-python serverctl.py --port 9000 --auth-token supersecret --repl
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret --repl
 ```
 
 Inside the REPL:
@@ -152,7 +162,7 @@ Hydrangea ships a **builder** in the controller to compile the Go client located
 
 ```bash
 # Build Linux + Windows agents (amd64) with embedded server host/port/token
-python serverctl.py --port 9000 --auth-token supersecret \
+python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
   build-client --server-host 192.168.1.10 --server-port 9000 \
   --build-auth-token supersecret --out ./dist
 
@@ -195,7 +205,7 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn’t im
 
 ### Admin actions
 
-Run from the controller (`serverctl.py`):
+Run from the controller (`Hydrangea-ctl.py`):
 
 * `clients` — List connected client IDs.
 * `ping --client <id>` — Send a ping to a client (server doesn’t wait for a reply).

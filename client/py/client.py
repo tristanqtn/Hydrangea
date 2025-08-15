@@ -10,7 +10,7 @@ import socket
 import getpass
 from typing import Optional
 
-from common import read_frame, write_frame, sha256_bytes, resolve_client_path
+from server.common import read_frame, write_frame, sha256_bytes, resolve_client_path
 
 logging.basicConfig(
     level=logging.INFO,

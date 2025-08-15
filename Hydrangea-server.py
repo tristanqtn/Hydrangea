@@ -7,7 +7,7 @@ import os
 import uuid
 from typing import Dict, Any
 
-from common import read_frame, write_frame, ProtocolError, safe_join
+from server.common import read_frame, write_frame, ProtocolError, safe_join
 
 logging.basicConfig(
     level=logging.INFO,
