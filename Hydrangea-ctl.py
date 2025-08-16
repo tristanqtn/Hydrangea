@@ -114,6 +114,9 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("--os", action="append", choices=["linux", "windows"])
     sp.add_argument("--arch", default="amd64", choices=["amd64", "arm64"])
 
+    # server-status (REPL)
+    sub.add_parser("server-status", help="Check the server's health status")
+
     # meta
     sub.add_parser("help", help="Show help or 'help <command>'")
     sub.add_parser("quit", help="Exit the console")
@@ -187,12 +190,12 @@ async def run_repl(args) -> None:
 
     help_header = (
         "Type 'help' to see commands, 'help <cmd>' for details. Examples:\n"
-        "  >> clients\n"
-        "  >> use laptop1    # set active client\n"
-        '  >> exec --command "uname -a"   # uses active client\n'
-        "  >> list --path /etc --wait      # also uses active client\n"
-        "  >> unuse           # clear active client\n"
-        "  >> build-client --server-host 10.0.0.5 --server-port 9000 --build-auth-token supersecret\n"
+        "  >> clients                       # list connected clients\n"
+        "  >> use laptop1                   # set active client\n"
+        '  >> exec --command "uname -a"     # uses active client\n'
+        "  >> list --path /etc --wait       # also uses active client\n"
+        "  >> unuse                         # clear active client\n"
+        "  >> build-client --server-host 10.0.0.5 --server-port 9000 --build-auth-token supersecret # build client beacons\n"
     )
 
     while True:
@@ -456,6 +459,22 @@ async def run_repl(args) -> None:
                 print(f"{ui.TAG_ERR} build error: {e}")
             continue
 
+        if cmd == "server-status":
+            resp, _ = await admin_send(
+                args.host, args.port, args.auth_token, {"action": "health_status"}
+            )
+            if resp.get("type") == "HEALTH_STATUS":
+                ui.rule(" server health status ")
+                ui.kv("Status", resp.get("status"))
+                ui.kv("Connected Agents", resp.get("connected_agents"))
+                ui.rule(" recent logs ")
+                for log_entry in resp.get("recent_logs", []):
+                    print(log_entry)
+                ui.rule()
+            else:
+                print_error(ui, resp)
+            continue
+
         print(ui.TAG_ERR, f"Unknown command: {cmd}")
 
 
@@ -606,6 +625,22 @@ async def classic_cli(args):
             print(f"{ui.TAG_ERR} build error: {e}")
         return
 
+    if args.subcmd == "server-status":
+        resp, _ = await admin_send(
+            args.host, args.port, args.auth_token, {"action": "health_status"}
+        )
+        if resp.get("type") == "HEALTH_STATUS":
+            print("Server Health Status:")
+            print(f"  Status: {resp.get('status')}")
+            print(f"  Connected Agents: {resp.get('connected_agents')}")
+            print("  Recent Logs:")
+            for log_entry in resp.get("recent_logs", []):
+                print(f"    {log_entry}")
+        else:
+            print("Error fetching server status:")
+            print(resp)
+        return
+
 
 def start_server(args):
     ui = UI(
@@ -739,6 +774,8 @@ async def main():
         choices=["amd64", "arm64"],
         help="Target arch (default amd64)",
     )
+
+    sp = sub.add_parser("server-status", help="Check the server's health status")
 
     args = ap.parse_args()
 

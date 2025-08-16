@@ -69,7 +69,7 @@ class UI:
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀  
                                       ███    ███                                                               
 
-              Hydrangea C2 Controller  •  V2.0 (REPL)
+              Hydrangea C2 Controller  •  V2.1 (REPL)
 """
         print(self.c(art, "magenta"))
 

