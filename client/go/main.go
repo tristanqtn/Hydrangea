@@ -27,8 +27,8 @@ var (
 	// Injected via -ldflags -X (see serverctl build-client)
 	DefaultServerHost = "127.0.0.1"
 	DefaultServerPort = "9000"
-	DefaultAuthToken  = "changeme"
-	DefaultClientID   = ""
+	DefaultAuthToken  = "supersecret"
+	DefaultClientID   = "default-hydrangea-beacon"
 )
 
 type Header map[string]any

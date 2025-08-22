@@ -718,7 +718,7 @@ def start_server(args):
 
 async def main():
     ap = argparse.ArgumentParser(description="Hydrangea C2 controller (REPL + classic)")
-    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--auth-token", required=True)
     ap.add_argument(
