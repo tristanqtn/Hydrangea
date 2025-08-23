@@ -1,20 +1,33 @@
-name: CI/CD Pipeline
+name: CI / Release
 
 on:
   push:
     branches: [ main ]
+    tags:    [ 'v*' ]     # créer une release quand on push un tag vX.Y.Z
   pull_request:
     branches: [ main ]
 
 permissions:
-  contents: read
+  contents: write          # nécessaire pour créer la release
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build-test:
+  build:
+    name: Build (${{ matrix.target.name }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { name: linux,   flake_attr: hydrangea-client-linux }
+          - { name: windows, flake_attr: hydrangea-client-windows }
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Install Nix
         uses: cachix/install-nix-action@v31
@@ -22,24 +35,45 @@ jobs:
           nix_path: nixpkgs=channel:nixos-unstable
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Build Linux client and capture exact out path (avoid relying on "result" symlink)
-      - id: build-linux
-        name: Build Linux Client
-        run: echo "out=$(nix build .#hydrangea-client-linux --print-out-paths)" >> "$GITHUB_OUTPUT"
+      - id: build
+        name: Nix build (${{ matrix.target.flake_attr }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="$(nix build ".#${{ matrix.target.flake_attr }}" --print-out-paths)"
+          echo "out=${OUT}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Linux Client Artifact
+      - id: discover
+        name: Locate produced binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUT="${{ steps.build.outputs.out }}"
+          BIN_PATH="$(find "${OUT}/bin" -maxdepth 1 -type f -perm -111 | head -n1)"
+          BIN_NAME="$(basename "${BIN_PATH}")"
+          echo "bin_path=${BIN_PATH}" >> "$GITHUB_OUTPUT"
+          echo "bin_name=${BIN_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact (${{ steps.discover.outputs.bin_name }})
         uses: actions/upload-artifact@v4
         with:
-          name: hydrangea-client-linux
-          path: ${{ steps.build-linux.outputs.out }}
+          name: ${{ steps.discover.outputs.bin_name }}
+          path: ${{ steps.discover.outputs.bin_path }}
 
-      # Build Windows client and capture out path
-      - id: build-windows
-        name: Build Windows Client
-        run: echo "out=$(nix build .#hydrangea-client-windows --print-out-paths)" >> "$GITHUB_OUTPUT"
-
-      - name: Upload Windows Client Artifact
-        uses: actions/upload-artifact@v4
+  release:
+    name: Release
+    needs: [ build ]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: hydrangea-client-windows
-          path: ${{ steps.build-windows.outputs.out }}
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: artifacts/**/*
