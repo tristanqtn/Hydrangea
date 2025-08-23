@@ -4,34 +4,42 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]        
+    branches: [ main ]
+
+permissions:
+  contents: read
 
 jobs:
   build-test:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Install Nix
-        uses: cachix/install-nix-action@v17
+        uses: cachix/install-nix-action@v31
         with:
-          nix_path: nixpkgs=channel:nixos-25.05
+          nix_path: nixpkgs=channel:nixos-unstable
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build Linux Client
-        run: nix build .#hydrangea-client-linux
+      # Build Linux client and capture exact out path (avoid relying on "result" symlink)
+      - id: build-linux
+        name: Build Linux Client
+        run: echo "out=$(nix build .#hydrangea-client-linux --print-out-paths)" >> "$GITHUB_OUTPUT"
 
       - name: Upload Linux Client Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hydrangea-client-linux
-          path: result
+          path: ${{ steps.build-linux.outputs.out }}
 
-      - name: Build Windows Client
-        run: nix build .#hydrangea-client-windows
+      # Build Windows client and capture out path
+      - id: build-windows
+        name: Build Windows Client
+        run: echo "out=$(nix build .#hydrangea-client-windows --print-out-paths)" >> "$GITHUB_OUTPUT"
 
       - name: Upload Windows Client Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: hydrangea-client-windows
-          path: result
+          path: ${{ steps.build-windows.outputs.out }}
