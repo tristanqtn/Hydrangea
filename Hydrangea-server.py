@@ -8,6 +8,8 @@ import uuid
 from typing import Dict, Any
 import logging.handlers
 
+__version__ = "2.2"
+
 from server.common import read_frame, write_frame, ProtocolError, safe_join
 
 logging.basicConfig(
@@ -101,6 +103,14 @@ class Server:
             await writer.wait_closed()
             return
 
+        # Handle test connections separately
+        if client_id.startswith("test-connection"):
+            await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
+            log.info(f"Test connection successful: {client_id}")
+            writer.close()
+            await writer.wait_closed()
+            return
+        
         # Replace existing session if duplicate
         if client_id in self.clients:
             try:
@@ -110,7 +120,7 @@ class Server:
 
         session = ClientSession(client_id, writer)
         self.clients[client_id] = session
-        await write_frame(writer, {"type": "REGISTERED", "server_version": "0.3.1"})
+        await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
         log.info(f"Client registered: {client_id}")
 
         # Start a task to pump orders to client
@@ -478,7 +488,7 @@ art = r"""
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀        ▄████████▀    ██████████   ███    ███  ▀██████▀    ██████████   ███    ███ 
                                       ███    ███                                                                                                ███    ███                           ███    ███ 
 
-              Hydrangea C2 Server  •  V1.2
+              Hydrangea C2 Server
 """
 
 
@@ -500,6 +510,7 @@ async def amain():
     ap.add_argument("--auth-token", required=True, help="Shared auth token")
 
     print(art)
+    print(f"Version: {__version__}")
 
     args = ap.parse_args()
 

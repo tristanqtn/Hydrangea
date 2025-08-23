@@ -54,7 +54,7 @@ class UI:
     def TAG_QUE(self):
         return self.c("[~]", "yellow")
 
-    def banner(self):
+    def banner(self, version):
         if not self.show_banner_flag or self.quiet:
             return
         art = r"""
@@ -72,6 +72,8 @@ class UI:
               Hydrangea C2 Controller  •  V2.1 (REPL)
 """
         print(self.c(art, "magenta"))
+        print(self.c(f"  V{version}", "magenta"))
+        print(self.c("  by Tristan @tristanqtn", "magenta"))
 
     def rule(self, label=""):
         width = shutil.get_terminal_size((80, 20)).columns
@@ -230,7 +232,9 @@ def print_session(ui: UI, client: str, resp: dict, payload: bytes):
         f"{info.get('hostname', '?')} ({info.get('system', '?')} {info.get('release', '?')}, {info.get('machine', '?')})",
     )
     ui.kv("User/PID", f"{info.get('user', '?')} / {info.get('pid', '?')}")
-    ui.kv("CWD", info.get("cwd", "?"))
-    ui.kv("Root base", info.get("root", "?"))
-    ui.kv("Beacon", f"{info.get('python', '?')} @ {info.get('executable', '?')}")
+    ui.kv("CWD", info.get('cwd', '?'))
+    ui.kv("Root base", info.get('root', '?'))
+    ui.kv("Platform", info.get('platform', '?'))
+    ui.kv("Version", info.get('version', '?'))
+    ui.kv("Executable", info.get('executable', '?'))
     ui.rule()

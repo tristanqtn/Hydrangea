@@ -107,4 +107,4 @@ def build_go_clients(ui: UI, args):
     ui.rule(" build result ")
     ui.headline(f"{ui.TAG_OK} built {len(built)} client(s)")
     for p in built:
-        ui.kv("output", p)
+        ui.kv("output", src_root+p[2:])
