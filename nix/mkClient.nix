@@ -15,9 +15,9 @@ target:
     postInstall = ''
       for f in $out/bin/*; do
         if [ "${target}" = "mingwW64" ]; then
-          mv "$f" "$out/bin/hydrangea-client-${target}-${version}.exe"
+          mv "$f" "$out/bin/hydrangea-client-Windows64-${version}.exe"
         else
-          mv "$f" "$out/bin/hydrangea-client-${target}-${version}"
+          mv "$f" "$out/bin/hydrangea-client-Linux64-${version}"
         fi
       done
     '';
