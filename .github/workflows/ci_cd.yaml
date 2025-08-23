@@ -3,12 +3,12 @@ name: CI / Release
 on:
   push:
     branches: [ main ]
-    tags:    [ 'v*' ]     # créer une release quand on push un tag vX.Y.Z
+    tags:    [ 'v*' ]  
   pull_request:
     branches: [ main ]
 
 permissions:
-  contents: write          # nécessaire pour créer la release
+  contents: write        
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
