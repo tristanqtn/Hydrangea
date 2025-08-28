@@ -29,6 +29,7 @@ The Go agent is a single binary compiled from `main.go`. At build time you can *
 
 * Go 1.21+ (recommended 1.22+)
 * A shell (PowerShell/CMD on Windows, Bash/Zsh on Unix)
+* Optionally, Nix for reproducible cross-platform builds
 
 ### 2.2 Direct build with Go
 
@@ -98,6 +99,70 @@ python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
 ```
 
 The wrapper sets `GOOS/GOARCH/CGO_ENABLED=0`, injects the `-X main.Default*` flags, and emits binaries named like `hydrangea-client-<os>-<arch>[.exe]` into the output folder.
+
+### 2.4 Building with Nix Flakes
+
+Hydrangea C2 includes a Nix flake configuration for reproducible, cross-platform builds of the client. This approach offers several advantages:
+
+- Deterministic builds with pinned dependencies
+- Cross-platform support without requiring the target OS/platform
+- Static binaries with zero CGO dependencies
+- Versioned outputs with consistent naming
+
+#### Prerequisites
+
+* Nix package manager with flakes enabled
+
+#### Building clients
+
+To build the Linux (x86_64) client:
+
+```bash
+# From the repository root
+nix build .#hydrangea-client-linux
+```
+
+To build the Windows (x86_64) client:
+
+```bash
+nix build .#hydrangea-client-windows
+```
+
+You can build both targets at once:
+
+```bash
+nix build .#hydrangea-client-linux .#hydrangea-client-windows
+```
+
+After the build completes, Nix creates `result*` symlinks in your working directory. These link to the compiled binaries in the Nix store.
+
+```bash
+# Example: Access the built binaries
+ls -l result*/bin/
+```
+
+The output binaries include the target platform and version in the filename:
+
+- Linux: `hydrangea-client-Linux64-0.1.0`
+- Windows: `hydrangea-client-Windows64-0.1.0.exe`
+
+#### Understanding the Nix configuration
+
+The flake configuration consists of two main files:
+
+1. `flake.nix`: Defines the build targets and dependencies
+   - Imports `nixpkgs` from GitHub
+   - Defines the target system architecture 
+   - Imports the `mkClient` function
+   - Configures the output packages for Linux and Windows
+
+2. `nix/mkClient.nix`: A reusable function for building Go clients across different platforms
+   - Uses `pkgsCross` to enable cross-compilation
+   - Sets `CGO_ENABLED=0` for static binaries
+   - Configures proper naming of output files
+   - Ensures vendorHash is consistent for reproducible builds
+
+This approach ensures that anyone with Nix can produce identical binaries regardless of their host system.
 
 ---
 

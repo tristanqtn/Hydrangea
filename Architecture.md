@@ -136,6 +136,13 @@ Hydrangea includes a builder that compiles the Go client from `./client/go` and 
 * Environment for builds: `GOOS`, `GOARCH`, `CGO_ENABLED=0`.
 * Output binaries are named like `hydrangea-client-<os>-<arch>[.exe]` into the chosen `--out` directory.
 
+For reproducible builds, Hydrangea also provides a **Nix flake configuration** that:
+
+* Uses `pkgsCross` for Linux (gnu64) and Windows (mingwW64) targets
+* Guarantees deterministic builds with vendorHash and pinned dependencies
+* Creates static binaries with zero CGO dependencies
+* Names outputs with platform and version: `hydrangea-client-<OS>64-<version>[.exe]`
+
 At runtime, the client still accepts flags (`--server`, `--port`, `--auth-token`, `--client-id`, `--root`) to override embedded defaults when desired.
 
 ---
