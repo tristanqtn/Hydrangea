@@ -21,9 +21,9 @@ import sys
 import subprocess
 from typing import Dict, Optional, Tuple
 
-from server.common import write_frame, read_frame
-from server.go_builder import build_go_clients
-from server.UI import *
+from utils.common import write_frame, read_frame
+from utils.go_builder import build_go_clients
+from utils.UI import *
 
 __version__ = "2.1"
 

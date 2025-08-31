@@ -226,41 +226,6 @@ Run from the controller (`Hydrangea-ctl.py`):
 
 > **REPL-only meta:** `use <id>` / `unuse` to manage active client context (no network call; it only changes REPL behavior).
 
-### Client orders (server → client)
-
-* `PING` — Health check. Client replies `PONG`.
-* `LIST_DIR {path, req_id?}` — List contents of a directory.
-* `PULL_FILE {src_path, save_as}` — Client reads `src_path` and ships the bytes to the server.
-* `PUSH_FILE {dest_path, src_name} + payload` — Server sends file bytes; client writes them to `dest_path`.
-* `EXEC {cmd, shell, cwd, timeout, req_id}` — Run a program and capture output.
-* `SESSION_INFO {req_id}` — Gather basic environment details.
-
-### Client responses (client → server)
-
-* `PONG` — Response to `PING`.
-* `RESULT_LIST_DIR {path, entries_count, req_id?} + payload(JSON)` — Payload: array of entries `{name,is_dir,bytes,mtime}`.
-* `FILE {src_path, save_as, sha256} + payload(bytes)` — Raw file bytes in payload.
-* `RESULT_EXEC {rc, req_id} + payload(JSON)` — Payload: `{"rc": int|null, "stdout": "...", "stderr": "..."}`.
-* `RESULT_SESSION_INFO {req_id} + payload(JSON)` — Payload: session info fields.
-* `LOG {message}` — Free-form informational message.
-
----
-
-## Protocol
-
-Every frame on the wire:
-
-```
-uint32_be  header_len
-bytes      header_json (UTF-8, compact)
-bytes      payload (optional; exactly header["size"] bytes)
-```
-
-* The header is a JSON object; the sender sets `"size"` automatically.
-* **Correlation**: orders that expect a direct reply include a unique `req_id`. The server pairs `RESULT_*` frames with the waiting admin connection.
-
----
-
 ## Storage & Paths
 
 * **Server side**
@@ -274,38 +239,6 @@ bytes      payload (optional; exactly header["size"] bytes)
   * When pushing, the client creates parent directories for the destination file if needed.
 
 > Use absolute paths sparingly and only where appropriate.
-
----
-
-## Security Notes
-
-* **Auth**: one shared token (minimal). Rotate it, keep it secret.
-* **Transport**: plain TCP by default. For production-grade scenarios, wrap with **TLS** (and consider mTLS).
-* **Scope**: Remote exec runs with the client’s user privileges. Prefer least-privilege users and constrained environments.
-* **Network**: Bind the server to trusted interfaces, firewall the listening ports, and avoid exposing to the public internet.
-* **Audit**: Logs record orders and events; ship them to your log stack for traceability.
-* **Data**: Transfers are buffered in memory in this reference build; avoid multi-GB files unless you extend streaming.
-
----
-
-## Troubleshooting
-
-* **`unknown_target`** — The client ID isn’t connected. Run `clients` and check the spelling.
-* **`Path traversal detected` (server)** — The target path would escape the allowed area. Use an **absolute** `--dest` or keep it relative under the client’s area.
-* **No output from `exec`** — Use `--shell` if you passed a single command string that relies on shell features; otherwise pass a JSON list.
-* **Listing errors like `No such file or directory`** — Verify the path exists and the client has permissions.
-* **Timeouts** — Increase `--timeout`, verify connectivity and client load.
-* **Go build fails** — Ensure Go ≥ 1.21 is on `PATH` and that `client/go/main.go` + `client/go/go.mod` exist.
-
----
-
-## Roadmap
-
-* TLS/mTLS knobs
-* Chunked/streaming transfers + resume
-* Server-side verification of file checksums
-* Structured logging / metrics endpoint
-* Role-based admin tokens & per-client ACLs
 
 ---
 

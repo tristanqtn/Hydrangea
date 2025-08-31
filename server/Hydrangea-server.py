@@ -10,7 +10,7 @@ import logging.handlers
 
 __version__ = "2.2"
 
-from server.common import read_frame, write_frame, ProtocolError, safe_join
+from utils.common import read_frame, write_frame, ProtocolError, safe_join
 
 logging.basicConfig(
     level=logging.INFO,
