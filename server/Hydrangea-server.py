@@ -270,6 +270,7 @@ class Server:
             "session_info",
             "health_status",
             "reverse_shell",
+            "port_forward",
         }:
             await write_frame(
                 writer, {"type": "ERROR", "error": "unknown_admin_action"}
@@ -456,6 +457,29 @@ class Server:
                 self.pending.pop(req_id, None)
             writer.close()
             await writer.wait_closed()
+            return
+
+        if action == "port_forward":
+            filename = header.get("filename")
+            connect_args = header.get("connect_args")
+            if not target or target not in self.clients:
+                await write_frame(writer, {"type": "ERROR", "error": "unknown_target"})
+                writer.close(); await writer.wait_closed()
+                return
+            session = self.clients[target]
+            order = {
+                "header": {
+                    "type": "PORT_FORWARD",
+                    "filename": filename,
+                    "connect_args": connect_args,
+                }
+            }
+            await session.queue.put(order)
+            await write_frame(
+                writer,
+                {"type": "QUEUED", "order": "port_forward", "filename": filename},
+            )
+            writer.close(); await writer.wait_closed()
             return
 
         if action == "reverse_shell":
