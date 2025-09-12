@@ -308,6 +308,7 @@ class ControllerUI:
             # Command Execution
             "exec": "Execute a command on the remote client",
             "reverse-shell": "Start a reverse shell connection",
+            "port-forward": "Set up port forwarding through the client",
             
             # Build & Deploy
             "build-client": "Compile Go clients with server configuration",
@@ -321,7 +322,7 @@ class ControllerUI:
         categories = [
             ("👥 Client Management", ["clients", "use", "unuse", "ping", "session"], "green"),
             ("📁 File Operations", ["list", "pull", "push"], "blue"),
-            ("⚡ Command Execution", ["exec", "reverse-shell"], "yellow"),
+            ("⚡ Command Execution", ["exec", "reverse-shell", "port-forward"], "yellow"),
             ("🔨 Build & Deploy", ["build-client"], "magenta"),
             ("🖥️ Server Operations", ["server-status", "local"], "cyan")
         ]
@@ -349,7 +350,7 @@ class ControllerUI:
         cmd_icons = {
             "clients": "👥", "use": "🎯", "unuse": "⭕", "ping": "🏓", "session": "📊",
             "list": "📁", "pull": "⬇️", "push": "⬆️",
-            "exec": "⚡", "reverse-shell": "🔄",
+            "exec": "⚡", "reverse-shell": "🔄", "port-forward": "🔄",
             "build-client": "🔨",
             "server-status": "🖥️", "local": "💻"
         }
