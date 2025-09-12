@@ -131,9 +131,6 @@ func safeJoin(root string, p string) (string, error) {
 	full = filepath.Clean(full)
 	base := filepath.Clean(root)
 	sep := string(os.PathSeparator)
-	if !strings.HasPrefix(full+sep, base+sep) && full != base {
-		return "", errors.New("path traversal detected")
-	}
 	return full, nil
 }
 

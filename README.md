@@ -1,7 +1,7 @@
 # Hydrangea C2
 
 ```
-   ▄█    █▄    ▄██   ▄   ████████▄     ▄████████    ▄████████ ███▄▄▄▄      ▄██████▄     ▄████████    ▄████████ 
+   ▄█    █▄    ▄██   ▄   ████████▄     ▄████████    ▄████████ ███▄▄▄▄      ▄██████▄     ▄```
   ███    ███   ███   ██▄ ███   ▀███   ███    ███   ███    ███ ███▀▀▀██▄   ███    ███   ███    ███   ███    ███ 
   ███    ███   ███▄▄▄███ ███    ███   ███    ███   ███    ███ ███   ███   ███    █▀    ███    █▀    ███    ███ 
  ▄███▄▄▄▄███▄▄ ▀▀▀▀▀▀███ ███    ███  ▄███▄▄▄▄██▀   ███    ███ ███   ███  ▄███         ▄███▄▄▄       ███    ███ 
@@ -11,7 +11,7 @@
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀  
                                       ███    ███                                                               
 
-              Hydrangea C2 •  V2.0
+              Hydrangea C2
 ```
 
 Hydrangea C2 is a modular command-and-control (C2) framework designed for secure, authorized remote administration. It features a Python-based server and controller, plus a Go client agent, enabling efficient management of multiple endpoints over TCP. Hydrangea supports file transfers, remote command execution, session info retrieval, and more, all with a focus on clarity, minimalism, and explicit control. Intended for trusted environments, it emphasizes ease of use, extensibility, and security best practices.
@@ -24,11 +24,9 @@ Hydrangea C2 is a modular command-and-control (C2) framework designed for secure
 * [Architecture](#architecture)
 * [Install & Run](#install--run)
 * [Controller UX](#controller-ux)
-  * [Classic CLI](#classic-cli)
-  * [REPL](#repl)
+  * [REPL Interface](#repl-interface)
 * [Agent builder (Go)](#agent-builder-go)
 * [Orders & Methods](#orders--methods)
-
   * [Admin actions](#admin-actions)
   * [Client orders (server → client)](#client-orders-server--client)
   * [Client responses (client → server)](#client-responses-client--server)
@@ -97,55 +95,7 @@ python3 Hydrangea-ctl.py --host 0.0.0.0 --port 9000 --auth-token supersecret --s
 [...]
 
 >> build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
-
-
----
-
-## Controller UX
-
-### Classic CLI
-
-```bash
-# Connected clients
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret clients
-
-# Directory listing (waits and renders a table)
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
-  list --client laptop1 --path /var/log --wait
-
-# Remote exec (shows stdout/stderr blocks)
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
-  exec --client laptop1 --command "uname -a" --shell
-
-# Session info (OS/user/cwd/host)
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret \
-  session --client laptop1
 ```
-
-### REPL
-
-You can run the controller as an interactive console, and **pin** a client context so you don’t have to pass `--client` every time.
-
-```bash
-# Start REPL (you can also just omit a subcommand)
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret --repl
-```
-
-Inside the REPL:
-
-```
->> clients
->> use laptop1           # sets active client context
->> exec --command "uname -a"
->> list --path / --wait
->> unuse                 # clears active context
->> use laptop3
->> session
-```
-
-* `use <client_id>` sets the active client.
-* `unuse` clears it (or `unuse <client_id>` only clears if it matches).
-* In REPL, `--client` becomes **optional**; commands will use the active client if provided.
 
 ---
 
@@ -213,18 +163,28 @@ Run from the controller (`Hydrangea-ctl.py`):
 * `ping --client <id>` — Send a ping to a client (server doesn’t wait for a reply).
 * `list --client <id> [--path <p>] [--wait] [--timeout <sec>]` — Request a directory listing on the client.
 
+#### File Operations:
+* `list [--client <id>] [--path <p>] [--wait] [--timeout <sec>]` — Request a directory listing on the client.
   * With `--wait`, the controller blocks and renders the result.
   * Without `--wait`, the order is queued; result is logged server-side.
-* `pull --client <id> --src <client_path> --dest <server_path>` — Ask the client to **send a file to the server**.
-
+* `pull [--client <id>] --src <client_path> --dest <server_path>` — Ask the client to **send a file to the server**.
   * If `--dest` is **absolute**, the server writes exactly there.
   * If `--dest` is relative, it saves under `server_storage/<client_id>/`.
-* `push --client <id> --src <local_path> --dest <client_path>` — Send a local file **from the controller machine** to the client.
-* `exec --client <id> --command "<str|json list>" [--shell] [--cwd <client_path>] [--timeout <sec>]` — Execute a system command on the client and return `rc/stdout/stderr`.
-* `session --client <id> [--timeout <sec>]` — Fetch basic session info (platform, system, release, machine, runtime, pid, user, cwd, hostname, root base, interpreter path).
-* `build-client [options]` — **Compile Go clients** from `./client/go` and embed server details (see [Agent builder (Go)](#agent-builder-go)).
+* `push [--client <id>] --src <local_path> --dest <client_path>` — Send a local file **from the controller machine** to the client.
 
-> **REPL-only meta:** `use <id>` / `unuse` to manage active client context (no network call; it only changes REPL behavior).
+#### Command Execution:
+* `exec [--client <id>] --command "<str|json list>" [--shell] [--cwd <client_path>] [--timeout <sec>]` — Execute a system command on the client and return `rc/stdout/stderr`.
+* `local --command "<command>"` — Execute a command locally on the controller machine.
+
+#### Advanced Features:
+* `reverse-shell [--client <id>] --controller-addr <host:port>` — Start a reverse shell from the client back to the controller.
+* `port-forward [--client <id>] --proxy-ip <ip> --proxy-port <port> --ligolo-path <path>` — Set up port forwarding using Ligolo agent.
+
+#### System:
+* `build-client [options]` — **Compile Go clients** from `./client/go` and embed server details (see [Agent builder (Go)](#agent-builder-go)).
+* `server-status` — Check the health status of the server.
+
+> **Note:** When using the REPL interface with an active client context (set via `use <id>`), the `--client` parameter becomes **optional** for all commands.
 
 ## Storage & Paths
 

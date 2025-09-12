@@ -76,7 +76,7 @@ def _build_one(
 
 def build_go_clients(ui: UI, args):
     # sources must be under ./client/go
-    src_root = os.path.abspath(os.path.join(os.getcwd(), "client", "go"))
+    src_root = os.path.abspath(os.path.join(os.getcwd(), "..", "client", "go"))
     _ensure_go_sources_exist(ui, src_root)
     go_bin = _check_go(ui)
 
@@ -107,4 +107,4 @@ def build_go_clients(ui: UI, args):
     ui.rule(" build result ")
     ui.headline(f"{ui.TAG_OK} built {len(built)} client(s)")
     for p in built:
-        ui.kv("output", src_root+p[2:])
+        ui.kv("output", src_root+"/"+p[2:])
