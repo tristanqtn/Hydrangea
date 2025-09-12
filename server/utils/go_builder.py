@@ -4,8 +4,7 @@ import os
 import shutil
 import subprocess
 from typing import Dict, Optional, Tuple
-from .UI import UI
-
+from .controller_ui import *
 
 def _check_go(ui: UI) -> str:
     go = shutil.which("go")

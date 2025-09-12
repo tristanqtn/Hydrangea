@@ -131,6 +131,9 @@ func safeJoin(root string, p string) (string, error) {
 	full = filepath.Clean(full)
 	base := filepath.Clean(root)
 	sep := string(os.PathSeparator)
+	if full != base && !strings.HasPrefix(full, base+sep) {
+		return "", errors.New("path escapes root")
+	}
 	return full, nil
 }
 
