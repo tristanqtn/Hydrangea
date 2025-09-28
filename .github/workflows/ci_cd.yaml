@@ -3,18 +3,62 @@ name: CI / Release
 on:
   push:
     branches: [ main ]
-    tags:    [ 'v*' ]  
+    tags:    [ 'v*' ]
   pull_request:
     branches: [ main ]
 
 permissions:
-  contents: write        
+  contents: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # Detect if /clients changed between the previous tag (or commit) and the current ref
+  changes:
+    name: Detect client changes
+    runs-on: ubuntu-latest
+    outputs:
+      clients_changed: ${{ steps.diff.outputs.clients_changed }}
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: diff
+        name: Did /clients change?
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Determine comparison base (previous tag if available, else previous commit)
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
+            CUR_TAG="${GITHUB_REF_NAME:-}"
+            if [[ -n "$CUR_TAG" ]] && git rev-parse -q "$CUR_TAG^{commit}" >/dev/null; then
+              BASE="$(git describe --tags --abbrev=0 "${CUR_TAG}^" 2>/dev/null || true)"
+            else
+              # Not on a tag push; compare with previous commit on branch
+              BASE="${{ github.event.before }}"
+            fi
+          else
+            BASE="${{ github.event.before }}"
+          fi
+
+          # Fallbacks
+          [[ -n "${BASE}" ]] || BASE="$(git rev-list --max-count=1 "${HEAD_SHA}^" 2>/dev/null || true)"
+          [[ -n "${BASE}" ]] || BASE="$(git rev-list --max-count=1 HEAD)"
+
+          echo "Comparing BASE=${BASE}..HEAD=${HEAD_SHA}"
+          CHANGED="$(git diff --name-only "${BASE}" "${HEAD_SHA}" -- clients/ | wc -l | tr -d ' ')"
+          if [[ "${CHANGED}" != "0" ]]; then
+            echo "clients_changed=true"  >> "$GITHUB_OUTPUT"
+          else
+            echo "clients_changed=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Changed files under /clients: ${CHANGED}"
+
   build:
     name: Build (${{ matrix.target.name }})
     runs-on: ubuntu-latest
@@ -40,7 +84,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          OUT="$(nix build ".#${{ matrix.target.flake_attr }}" --print-out-paths)"
+          OUT="$(nix build ".#${{ matrix.target.flake_attr }}" --print-out-paths | tail -n1)"
           echo "out=${OUT}" >> "$GITHUB_OUTPUT"
 
       - id: discover
@@ -50,30 +94,81 @@ jobs:
           set -euo pipefail
           OUT="${{ steps.build.outputs.out }}"
           BIN_PATH="$(find "${OUT}/bin" -maxdepth 1 -type f -perm -111 | head -n1)"
+          if [[ -z "${BIN_PATH}" ]]; then
+            echo "No executable found in ${OUT}/bin" >&2
+            exit 1
+          fi
           BIN_NAME="$(basename "${BIN_PATH}")"
           echo "bin_path=${BIN_PATH}" >> "$GITHUB_OUTPUT"
           echo "bin_name=${BIN_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Upload artifact (${{ steps.discover.outputs.bin_name }})
+      - name: Upload artifact (${{ steps.discover.outputs.bin_name }}-${{ matrix.target.name }})
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ steps.discover.outputs.bin_name }}
+          name: ${{ steps.discover.outputs.bin_name }}-${{ matrix.target.name }}
           path: ${{ steps.discover.outputs.bin_path }}
 
   release:
     name: Release
-    needs: [ build ]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [ changes, build ]
+    if: startsWith(github.ref, 'refs/tags/') && needs.changes.outputs.clients_changed == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts
+          merge-multiple: false
+
+      - name: Show downloaded tree (debug)
+        run: |
+          echo "---- artifacts/ content ----"
+          ls -lahR artifacts || true
+
+      - name: Prepare release assets (rename, checksums)
+        id: prep
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          mkdir -p release
+          shopt -s nullglob
+
+          for d in artifacts/*; do
+            [[ -d "$d" ]] || continue
+            f="$(find "$d" -maxdepth 1 -type f -perm -111 | head -n1 || true)"
+            [[ -n "$f" ]] || continue
+
+            base="$(basename "$d")"
+            os_hint=""
+            [[ "$base" == *linux* ]]   && os_hint="linux"
+            [[ "$base" == *windows* ]] && os_hint="windows"
+
+            ext=""
+            [[ "$os_hint" == "windows" && "$f" != *.exe ]] && ext=".exe"
+            out="release/hydrangea-client-${os_hint}-${TAG}${ext}"
+
+            cp "$f" "$out"
+            chmod +x "$out" || true
+          done
+
+          count=$(ls -1 release 2>/dev/null | wc -l || echo 0)
+          if [[ "$count" -eq 0 ]]; then
+            echo "No release assets found in artifacts/*" >&2
+            exit 1
+          fi
+
+          (cd release && sha256sum * > SHA256SUMS.txt)
+          echo "release_dir=$(pwd)/release" >> "$GITHUB_OUTPUT"
+
+      - name: List release payload
+        run: ls -lah ${{ steps.prep.outputs.release_dir }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          files: artifacts/**/*
+          fail_on_unmatched_files: true
+          files: |
+            ${{ steps.prep.outputs.release_dir }}/*

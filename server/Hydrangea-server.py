@@ -8,7 +8,7 @@ import uuid
 from typing import Dict, Any
 import logging.handlers
 
-__version__ = "2.2"
+__version__ = "3.2"
 
 from utils.common import read_frame, write_frame, ProtocolError, safe_join
 

@@ -1,0 +1,1 @@
+# No external dependencies. Hydrangea runs on Python 3.10+ stdlib only.

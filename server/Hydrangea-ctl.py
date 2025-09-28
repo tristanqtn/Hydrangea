@@ -15,6 +15,7 @@ from utils.controller_ui import *
 
 __version__ = "3.0"
 
+
 # ---------- wire ----------
 async def admin_send(
     host: str, port: int, auth_token: str, header: dict, payload: bytes = b""
@@ -182,11 +183,11 @@ async def run_repl(args) -> None:
     ui = UI(
         use_color=(not args.no_color), show_banner=(not args.no_banner), quiet=False
     )
-    
+
     # Create enhanced UI helper
     enhanced_ui = create_enhanced_ui(ui)
     client_formatter = EnhancedClientFormatter(ui)
-    
+
     # Show welcome screen
     enhanced_ui.show_welcome_screen(__version__, args.host, args.port)
 
@@ -227,7 +228,9 @@ async def run_repl(args) -> None:
             _, _, cmd = line.partition(" ")
             sp = sub_map.get(cmd.strip())
             if not sp:
-                enhanced_ui.show_error_with_suggestions(f"Unknown command: {cmd}", ["Type 'help' to see all commands"])
+                enhanced_ui.show_error_with_suggestions(
+                    f"Unknown command: {cmd}", ["Type 'help' to see all commands"]
+                )
                 continue
             enhanced_ui.show_command_help(cmd.strip(), sp)
             continue
@@ -329,9 +332,9 @@ async def run_repl(args) -> None:
             if not target:
                 enhanced_ui.show_no_client_error()
                 continue
-            
+
             enhanced_ui.show_file_transfer_info("File Pull", ns.src, ns.dest, target)
-            
+
             resp, _ = await admin_send(
                 args.host,
                 args.port,
@@ -339,7 +342,9 @@ async def run_repl(args) -> None:
                 {"action": "pull", "target_id": target, "src": ns.src, "dest": ns.dest},
             )
             if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued("File transfer", target, f"{ns.src} → {ns.dest}")
+                enhanced_ui.show_operation_queued(
+                    "File transfer", target, f"{ns.src} → {ns.dest}"
+                )
                 hint = f"{ui.c('📁 Note:', 'dim')} File will appear in server storage when client completes"
                 print(f"{ui.TAG_INF} {hint}")
             else:
@@ -354,12 +359,16 @@ async def run_repl(args) -> None:
             if not os.path.isfile(ns.src):
                 enhanced_ui.show_error_with_suggestions(
                     f"Local file not found: {ns.src}",
-                    ["Check the file path", "Ensure the file exists", "Use absolute or relative path"]
+                    [
+                        "Check the file path",
+                        "Ensure the file exists",
+                        "Use absolute or relative path",
+                    ],
                 )
                 continue
-            
+
             enhanced_ui.show_file_transfer_info("File Push", ns.src, ns.dest, target)
-            
+
             try:
                 with open(ns.src, "rb") as f:
                     data = f.read()
@@ -379,7 +388,9 @@ async def run_repl(args) -> None:
                 data,
             )
             if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued("File upload", target, f"{ns.src} → {ns.dest}")
+                enhanced_ui.show_operation_queued(
+                    "File upload", target, f"{ns.src} → {ns.dest}"
+                )
             else:
                 print_error(ui, resp)
             continue
@@ -439,7 +450,7 @@ async def run_repl(args) -> None:
                 ns.server_port = args.port
             if ns.build_auth_token is None:
                 ns.build_auth_token = args.auth_token
-            
+
             # Show build configuration
             build_config = {
                 "server_host": ns.server_host,
@@ -447,16 +458,20 @@ async def run_repl(args) -> None:
                 "client_id": ns.client_id,
                 "out": ns.out,
                 "os": ns.os,
-                "arch": ns.arch
+                "arch": ns.arch,
             }
             enhanced_ui.show_build_summary(build_config)
-            
+
             try:
                 build_go_clients(ui, ns)
             except Exception as e:
                 enhanced_ui.show_error_with_suggestions(
                     f"Build error: {e}",
-                    ["Check Go installation", "Verify client source code exists", "Check output directory permissions"]
+                    [
+                        "Check Go installation",
+                        "Verify client source code exists",
+                        "Check output directory permissions",
+                    ],
                 )
             continue
 
@@ -475,7 +490,9 @@ async def run_repl(args) -> None:
             controller_addr = ns.controller_addr
             target = _resolve_client(getattr(ns, "client", None))
             if not controller_addr:
-                enhanced_ui.show_error_with_suggestions("Controller address required (host:port)")
+                enhanced_ui.show_error_with_suggestions(
+                    "Controller address required (host:port)"
+                )
                 continue
             if not target:
                 enhanced_ui.show_no_client_error()
@@ -484,11 +501,19 @@ async def run_repl(args) -> None:
                 args.host,
                 args.port,
                 args.auth_token,
-                {"action": "reverse_shell", "target_id": target, "controller_addr": controller_addr},
+                {
+                    "action": "reverse_shell",
+                    "target_id": target,
+                    "controller_addr": controller_addr,
+                },
             )
             if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued("Reverse shell", target, f"→ {controller_addr}")
-                print(f"{ui.TAG_INF} 🌐 Open a listener on {ui.c(controller_addr, 'bold')} to receive the shell")
+                enhanced_ui.show_operation_queued(
+                    "Reverse shell", target, f"→ {controller_addr}"
+                )
+                print(
+                    f"{ui.TAG_INF} 🌐 Open a listener on {ui.c(controller_addr, 'bold')} to receive the shell"
+                )
             else:
                 print_error(ui, resp)
             continue
@@ -555,21 +580,26 @@ async def run_repl(args) -> None:
             local_command = ns.local_command
             try:
                 proc = subprocess.Popen(local_command, shell=True)
-                enhanced_ui.show_operation_success("Local command started", f"PID {proc.pid}")
+                enhanced_ui.show_operation_success(
+                    "Local command started", f"PID {proc.pid}"
+                )
                 # wait for the command to finish
                 proc.wait()
-                enhanced_ui.show_operation_success("Local command finished", f"PID {proc.pid}")
+                enhanced_ui.show_operation_success(
+                    "Local command finished", f"PID {proc.pid}"
+                )
                 ui.rule()
             except Exception as e:
-                enhanced_ui.show_error_with_suggestions(f"Failed to start local command: {e}")
+                enhanced_ui.show_error_with_suggestions(
+                    f"Failed to start local command: {e}"
+                )
                 ui.rule()
             continue
 
         enhanced_ui.show_error_with_suggestions(
-            f"Unknown command: {cmd}", 
-            ["Type 'help' to see available commands", "Check command spelling"]
+            f"Unknown command: {cmd}",
+            ["Type 'help' to see available commands", "Check command spelling"],
         )
-
 
 
 def start_server(args):

@@ -3,8 +3,9 @@
 import os
 import shutil
 import subprocess
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 from .controller_ui import *
+
 
 def _check_go(ui: UI) -> str:
     go = shutil.which("go")
@@ -106,4 +107,4 @@ def build_go_clients(ui: UI, args):
     ui.rule(" build result ")
     ui.headline(f"{ui.TAG_OK} built {len(built)} client(s)")
     for p in built:
-        ui.kv("output", src_root+"/"+p[2:])
+        ui.kv("output", src_root + "/" + p[2:])

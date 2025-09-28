@@ -22,12 +22,6 @@
     # --- Windows Client ---
       hydrangea-client-windows = mkClient "mingwW64";
 
-    # --- Server ---
-    # To do
-
-    # --- ctl ---
-    # To do
-
     };
   };
 }
