@@ -30,12 +30,16 @@ For a detailed documentation please consider reading the [Wiki](https://github.c
 * [Install & Run](#install--run)
 * [Orders & Methods](#orders--methods)
 * [Storage & Paths](#storage--paths)
-* [Roadmap](#roadmap)
-
 
 ---
 
 ## Overview
+
+### Back Story
+
+Hydrangea was born out of necessity. While working through certifications, CTFs, and personal research, I needed a straightforward way to manage a small fleet during post-exploitation phases, without wrestling bulky, over-engineered C2s. I wanted something simple, agile, and explicit: clear orders in, clear results out. So I built it. Hydrangea keeps the surface area small and the workflow calm, designed for authorized lab and internal environments where reliability and readability matter more than bells and whistles. Sometimes the easiest way is to make it yourself.
+
+### Structure
 
 Hydrangea C2 has three parts:
 
