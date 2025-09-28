@@ -15,49 +15,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Detect if /clients changed between the previous tag (or commit) and the current ref
   changes:
     name: Detect client changes
     runs-on: ubuntu-latest
     outputs:
-      clients_changed: ${{ steps.diff.outputs.clients_changed }}
+      clients_changed: ${{ steps.filter.outputs.clients }}
+      clients_files:   ${{ steps.filter.outputs.clients_files }}
     steps:
-      - name: Checkout full history
+      - name: Checkout (full history + tags)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
-      - id: diff
-        name: Did /clients change?
-        shell: bash
+      - name: Paths Changes Filter
+        id: filter
+        uses: dorny/paths-filter@v3.0.2
+        with:
+          ref:  ${{ github.sha }}
+          base: ${{ github.event.before }}
+          list-files: json
+          initial-fetch-depth: 200
+          filters: |
+            clients:
+              - 'clients/**'
+
+      - name: Log changed client files (debug)
         run: |
-          set -euo pipefail
-          # Determine comparison base (previous tag if available, else previous commit)
-          HEAD_SHA="$(git rev-parse HEAD)"
-          if git describe --tags --abbrev=0 >/dev/null 2>&1; then
-            CUR_TAG="${GITHUB_REF_NAME:-}"
-            if [[ -n "$CUR_TAG" ]] && git rev-parse -q "$CUR_TAG^{commit}" >/dev/null; then
-              BASE="$(git describe --tags --abbrev=0 "${CUR_TAG}^" 2>/dev/null || true)"
-            else
-              # Not on a tag push; compare with previous commit on branch
-              BASE="${{ github.event.before }}"
-            fi
-          else
-            BASE="${{ github.event.before }}"
-          fi
-
-          # Fallbacks
-          [[ -n "${BASE}" ]] || BASE="$(git rev-list --max-count=1 "${HEAD_SHA}^" 2>/dev/null || true)"
-          [[ -n "${BASE}" ]] || BASE="$(git rev-list --max-count=1 HEAD)"
-
-          echo "Comparing BASE=${BASE}..HEAD=${HEAD_SHA}"
-          CHANGED="$(git diff --name-only "${BASE}" "${HEAD_SHA}" -- clients/ | wc -l | tr -d ' ')"
-          if [[ "${CHANGED}" != "0" ]]; then
-            echo "clients_changed=true"  >> "$GITHUB_OUTPUT"
-          else
-            echo "clients_changed=false" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Changed files under /clients: ${CHANGED}"
+          echo "clients_changed=${{ steps.filter.outputs.clients }}"
+          echo "clients_files=${{ steps.filter.outputs.clients_files }}"
 
   build:
     name: Build (${{ matrix.target.name }})
