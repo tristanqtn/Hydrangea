@@ -103,6 +103,7 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("--out", default="./dist")
     sp.add_argument("--os", action="append", choices=["linux", "windows"])
     sp.add_argument("--arch", default="amd64", choices=["amd64", "arm64"])
+    sp.add_argument("--agent-path", default="", help="Path to custom agent source")
 
     # server-status (REPL)
     sub.add_parser("server-status", help="Check the server's health status")
@@ -134,7 +135,6 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("local_command", help="Local command to run")
 
     # Return also a mapping for subparser lookups (for help display)
-    subparsers_map = {a.dest: a for a in []}  # placeholder for type clarity
     return p, {sp_prog(p): p for p in sub._name_parser_map.values()}
 
 
@@ -461,9 +461,8 @@ async def run_repl(args) -> None:
                 "arch": ns.arch,
             }
             enhanced_ui.show_build_summary(build_config)
-
             try:
-                build_go_clients(ui, ns)
+                build_go_clients(ui, ns, ns.agent_path)
             except Exception as e:
                 enhanced_ui.show_error_with_suggestions(
                     f"Build error: {e}",

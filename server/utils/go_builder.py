@@ -74,9 +74,14 @@ def _build_one(
     return out_path
 
 
-def build_go_clients(ui: UI, args):
-    # sources must be under ./client/go
-    src_root = os.path.abspath(os.path.join(os.getcwd(), "..", "client", "go"))
+def build_go_clients(ui: UI, args, agent_path: str = ""):
+    if agent_path != "":
+        ui.rule(" build go client from custom path ")
+        src_root = os.path.abspath(agent_path)
+    else:
+        ui.rule(" build go client from default path ")
+        src_root = os.path.abspath(os.path.join(os.getcwd(), "..", "client", "go"))
+
     _ensure_go_sources_exist(ui, src_root)
     go_bin = _check_go(ui)
 
