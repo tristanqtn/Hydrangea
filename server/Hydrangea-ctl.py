@@ -582,11 +582,21 @@ async def run_repl(args) -> None:
                 enhanced_ui.show_operation_success(
                     "Local command started", f"PID {proc.pid}"
                 )
-                # wait for the command to finish
-                proc.wait()
-                enhanced_ui.show_operation_success(
-                    "Local command finished", f"PID {proc.pid}"
-                )
+                try:
+                    proc.wait(timeout=300)  # 5-minute hard limit
+                    enhanced_ui.show_operation_success(
+                        "Local command finished", f"exit {proc.returncode}"
+                    )
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    enhanced_ui.show_error_with_suggestions(
+                        "Local command timed out after 5 min — process killed"
+                    )
+                except KeyboardInterrupt:
+                    proc.terminate()
+                    enhanced_ui.show_operation_success(
+                        "Local command interrupted", f"PID {proc.pid}"
+                    )
                 ui.rule()
             except Exception as e:
                 enhanced_ui.show_error_with_suggestions(

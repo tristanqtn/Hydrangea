@@ -4,8 +4,9 @@ import argparse
 import asyncio
 import logging
 import os
+import time
 import uuid
-from typing import Dict, Any
+from typing import Any, Dict, Optional, Set
 import logging.handlers
 
 __version__ = "3.2"
@@ -31,6 +32,8 @@ class ClientSession:
         self.writer = writer
         self.queue: "asyncio.Queue[dict]" = asyncio.Queue()
         self.alive = True
+        self.last_seen: float = time.time()
+        self.pump_task: Optional[asyncio.Task] = None
 
 
 class Server:
@@ -43,6 +46,9 @@ class Server:
         self.clients: Dict[str, ClientSession] = {}
         self.servers: list[asyncio.base_events.Server] = []
         self.pending: Dict[str, asyncio.Future] = {}
+        # Maps client_id -> set of req_ids currently waiting for that client.
+        # Used to cancel futures immediately when the client disconnects.
+        self.client_futures: Dict[str, Set[str]] = {}
         self.log_buffer = logging.handlers.MemoryHandler(capacity=100, target=None)
         logging.getLogger().addHandler(self.log_buffer)
 
@@ -56,6 +62,7 @@ class Server:
             self.servers.append(srv)
             sockets = ", ".join(str(s.getsockname()) for s in srv.sockets or [])
             log.info(f"Listening on {sockets}")
+        asyncio.create_task(self._keepalive_loop())
         await asyncio.gather(*(srv.serve_forever() for srv in self.servers))
 
     async def handle_connection(
@@ -125,12 +132,13 @@ class Server:
         await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
         log.info(f"Client registered: {client_id}")
 
-        # Start a task to pump orders to client
-        asyncio.create_task(self._pump_orders(session))
+        # Start a task to pump orders to client; store ref for clean cancellation
+        session.pump_task = asyncio.create_task(self._pump_orders(session))
 
         try:
             while not reader.at_eof():
                 header, payload = await read_frame(reader)
+                session.last_seen = time.time()
                 t = header.get("type")
                 if t == "PONG":
                     print(f"[{client_id}] PONG received, client is alive")
@@ -227,6 +235,15 @@ class Server:
         except Exception as e:
             log.exception(f"Error handling client {client_id}: {e}")
         finally:
+            # Cancel the pump task so it doesn't linger after disconnect
+            if session.pump_task and not session.pump_task.done():
+                session.pump_task.cancel()
+            # Immediately cancel any admin futures waiting for this client
+            # so callers get CancelledError instead of waiting for full timeout
+            for rid in self.client_futures.pop(client_id, set()):
+                fut = self.pending.pop(rid, None)
+                if fut and not fut.done():
+                    fut.cancel()
             try:
                 writer.close()
                 await writer.wait_closed()
@@ -237,15 +254,51 @@ class Server:
             log.info(f"Client {client_id} removed")
 
     async def _pump_orders(self, session: ClientSession):
-        while session.alive:
-            try:
-                order = await session.queue.get()
-                await write_frame(
-                    session.writer, order["header"], order.get("payload", b"")
-                )
-            except Exception as e:
-                log.warning(f"Failed to send order to {session.client_id}: {e}")
-                break
+        try:
+            while session.alive:
+                try:
+                    order = await session.queue.get()
+                    await write_frame(
+                        session.writer, order["header"], order.get("payload", b"")
+                    )
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    log.warning(f"Failed to send order to {session.client_id}: {e}")
+                    break
+        except asyncio.CancelledError:
+            pass
+        finally:
+            session.alive = False
+
+    async def _keepalive_loop(self, interval: int = 30, dead_after: int = 90):
+        """Ping all clients every `interval` seconds; evict those silent for `dead_after` seconds."""
+        while True:
+            await asyncio.sleep(interval)
+            now = time.time()
+            # Identify stale clients before iterating further
+            dead = [
+                cid for cid, sess in list(self.clients.items())
+                if now - sess.last_seen > dead_after
+            ]
+            for cid in dead:
+                sess = self.clients.get(cid)
+                if sess:
+                    log.warning(
+                        f"Keepalive: evicting stale client {cid} "
+                        f"(last seen {int(now - sess.last_seen)}s ago)"
+                    )
+                    sess.alive = False
+                    try:
+                        sess.writer.close()
+                    except Exception:
+                        pass
+            # Ping all remaining live clients
+            for sess in list(self.clients.values()):
+                try:
+                    await sess.queue.put({"header": {"type": "PING"}})
+                except Exception:
+                    pass
 
     def get_health_status(self):
         """Generate the server's health status."""
@@ -331,6 +384,7 @@ class Server:
                 req_id = uuid.uuid4().hex
                 fut: asyncio.Future = asyncio.get_running_loop().create_future()
                 self.pending[req_id] = fut
+                self.client_futures.setdefault(target, set()).add(req_id)
                 order = {"header": {"type": "LIST_DIR", "path": path, "req_id": req_id}}
                 await session.queue.put(order)
                 try:
@@ -424,6 +478,7 @@ class Server:
             req_id = uuid.uuid4().hex
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             self.pending[req_id] = fut
+            self.client_futures.setdefault(target, set()).add(req_id)
             order = {
                 "header": {
                     "type": "EXEC",
@@ -452,6 +507,7 @@ class Server:
             req_id = uuid.uuid4().hex
             fut: asyncio.Future = asyncio.get_running_loop().create_future()
             self.pending[req_id] = fut
+            self.client_futures.setdefault(target, set()).add(req_id)
             order = {"header": {"type": "SESSION_INFO", "req_id": req_id}}
             await session.queue.put(order)
             try:

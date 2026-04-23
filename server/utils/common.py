@@ -28,8 +28,8 @@ async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], byte
     """
     header_len_bytes = await reader.readexactly(HEADER_LEN_SIZE)
     (header_len,) = struct.unpack("!I", header_len_bytes)
-    if header_len > 10_000_000:
-        raise ProtocolError("Unreasonable header length")
+    if header_len > 65_536:
+        raise ProtocolError(f"Header too large: {header_len} bytes (max 64 KiB)")
     header_bytes = await reader.readexactly(header_len)
     try:
         header = json.loads(header_bytes.decode("utf-8"))
@@ -37,6 +37,10 @@ async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], byte
         raise ProtocolError(f"Invalid JSON header: {e}") from e
 
     size = int(header.get("size", 0))
+    if size < 0:
+        raise ProtocolError("Negative payload size")
+    if size > 256 * 1024 * 1024:
+        raise ProtocolError(f"Payload too large: {size} bytes (max 256 MiB)")
     payload = b""
     if size:
         payload = await reader.readexactly(size)
