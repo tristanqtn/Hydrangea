@@ -53,9 +53,8 @@ class Server:
         logging.getLogger().addHandler(self.log_buffer)
 
     async def start(self):
-        print
-        print(
-            f"Starting server on {self.host}:{', '.join(map(str, self.ports))} with storage at {self.storage}"
+        log.info(
+            f"Starting on {self.host}:{', '.join(map(str, self.ports))}  storage={self.storage}"
         )
         for port in self.ports:
             srv = await asyncio.start_server(self.handle_connection, self.host, port)
@@ -141,7 +140,7 @@ class Server:
                 session.last_seen = time.time()
                 t = header.get("type")
                 if t == "PONG":
-                    print(f"[{client_id}] PONG received, client is alive")
+                    log.debug(f"[{client_id}] PONG")
 
                 elif t == "RESULT_LIST_DIR":
                     rid = header.get("req_id")
@@ -613,10 +612,14 @@ async def amain():
     )
     ap.add_argument("--auth-token", required=True, help="Shared auth token")
 
-    print(art)
-    print(f"Version: {__version__}")
-
     args = ap.parse_args()
+
+    print(art)
+    print(f"  Version  {__version__}")
+    print(f"  Host     {args.host}")
+    print(f"  Ports    {', '.join(map(str, args.ports))}")
+    print(f"  Storage  {args.storage}")
+    print()
 
     srv = Server(args.host, args.ports, args.storage, args.auth_token)
     try:

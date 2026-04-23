@@ -180,3 +180,4 @@ result
 # End of https://www.toptal.com/developers/gitignore/api/python
 CLAUDE.md
 PROGRESS.md
+.claude/settings.local.json
