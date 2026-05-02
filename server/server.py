@@ -2,8 +2,12 @@
 
 import argparse
 import asyncio
+import hashlib
 import logging
 import os
+import shutil
+import ssl
+import subprocess
 import time
 import uuid
 from typing import Any, Dict, Optional, Set
@@ -11,7 +15,7 @@ import logging.handlers
 
 __version__ = "3.2"
 
-from utils.common import read_frame, write_frame, ProtocolError, safe_join
+from .utils.common import read_frame, write_frame, ProtocolError, safe_join
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +30,41 @@ logging.getLogger().addHandler(file_handler)
 log = logging.getLogger("hydrangea.server")
 
 
+# ── TLS helpers ───────────────────────────────────────────────────────────────
+
+def _gen_self_signed_cert(cert_path: str, key_path: str) -> None:
+    """Generate a self-signed cert + key via openssl (RSA-2048, 10-year validity)."""
+    if not shutil.which("openssl"):
+        raise RuntimeError(
+            "openssl not found in PATH. "
+            "Provide --tls-cert and --tls-key manually, or install openssl."
+        )
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+            "-keyout", key_path, "-out", cert_path,
+            "-days", "3650", "-subj", "/CN=hydrangea-c2",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    log.info(f"Generated TLS certificate: {cert_path}  key: {key_path}")
+
+
+def _cert_fingerprint(cert_path: str) -> str:
+    """Return the hex SHA256 fingerprint of a PEM certificate (no colons)."""
+    with open(cert_path) as fh:
+        pem = fh.read()
+    der = ssl.PEM_cert_to_DER_cert(pem)
+    return hashlib.sha256(der).hexdigest()
+
+
+def _make_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(cert_path, key_path)
+    return ctx
+
+
 class ClientSession:
     def __init__(self, client_id: str, writer: asyncio.StreamWriter):
         self.client_id = client_id
@@ -37,11 +76,19 @@ class ClientSession:
 
 
 class Server:
-    def __init__(self, host: str, ports: list[int], storage: str, auth_token: str):
+    def __init__(
+        self,
+        host: str,
+        ports: list[int],
+        storage: str,
+        auth_token: str,
+        ssl_ctx: Optional[ssl.SSLContext] = None,
+    ):
         self.host = host
         self.ports = ports
         self.storage = storage
         self.auth_token = auth_token
+        self.ssl_ctx = ssl_ctx
         os.makedirs(self.storage, exist_ok=True)
         self.clients: Dict[str, ClientSession] = {}
         self.servers: list[asyncio.base_events.Server] = []
@@ -57,7 +104,9 @@ class Server:
             f"Starting on {self.host}:{', '.join(map(str, self.ports))}  storage={self.storage}"
         )
         for port in self.ports:
-            srv = await asyncio.start_server(self.handle_connection, self.host, port)
+            srv = await asyncio.start_server(
+                self.handle_connection, self.host, port, ssl=self.ssl_ctx
+            )
             self.servers.append(srv)
             sockets = ", ".join(str(s.getsockname()) for s in srv.sockets or [])
             log.info(f"Listening on {sockets}")
@@ -88,6 +137,7 @@ class Server:
         if msg_type == "REGISTER":
             await self.handle_client(reader, writer, header)
         elif msg_type == "ADMIN":
+            log.info(f"Admin connected from {peer} action={header.get('action')}")
             await self.handle_admin(reader, writer, header, payload)
         else:
             await write_frame(
@@ -611,22 +661,53 @@ async def amain():
         help="Directory to store incoming files",
     )
     ap.add_argument("--auth-token", required=True, help="Shared auth token")
+    ap.add_argument("--tls-cert",  default=None, metavar="PEM", help="TLS certificate file")
+    ap.add_argument("--tls-key",   default=None, metavar="PEM", help="TLS private key file")
+    ap.add_argument(
+        "--tls-auto", action="store_true",
+        help="Auto-generate a self-signed TLS cert (requires openssl in PATH)",
+    )
 
     args = ap.parse_args()
 
+    # ── TLS setup ─────────────────────────────────────────────────────────────
+    ssl_ctx: Optional[ssl.SSLContext] = None
+    tls_fingerprint: Optional[str] = None
+
+    if args.tls_auto or (args.tls_cert and args.tls_key):
+        cert_path = args.tls_cert or "hydrangea.crt"
+        key_path  = args.tls_key  or "hydrangea.key"
+        if args.tls_auto and (
+            not os.path.exists(cert_path) or not os.path.exists(key_path)
+        ):
+            _gen_self_signed_cert(cert_path, key_path)
+        ssl_ctx = _make_ssl_context(cert_path, key_path)
+        tls_fingerprint = _cert_fingerprint(cert_path)
+
+    # ── banner ────────────────────────────────────────────────────────────────
     print(art)
-    print(f"  Version  {__version__}")
-    print(f"  Host     {args.host}")
-    print(f"  Ports    {', '.join(map(str, args.ports))}")
-    print(f"  Storage  {args.storage}")
+    print(f"  Version      {__version__}")
+    print(f"  Host         {args.host}")
+    print(f"  Ports        {', '.join(map(str, args.ports))}")
+    print(f"  Storage      {args.storage}")
+    if ssl_ctx:
+        print(f"  TLS          enabled")
+        print(f"  Cert         {cert_path}")
+        print(f"  Fingerprint  {tls_fingerprint}")
+    else:
+        print(f"  TLS          disabled  (pass --tls-auto or --tls-cert/--tls-key to enable)")
     print()
 
-    srv = Server(args.host, args.ports, args.storage, args.auth_token)
+    srv = Server(args.host, args.ports, args.storage, args.auth_token, ssl_ctx=ssl_ctx)
     try:
         await srv.start()
     except KeyboardInterrupt:
         print("Shutting down...")
 
 
-if __name__ == "__main__":
+def main() -> None:
     asyncio.run(amain())
+
+
+if __name__ == "__main__":
+    main()
