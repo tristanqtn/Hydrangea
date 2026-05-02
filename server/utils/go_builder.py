@@ -3,8 +3,8 @@
 import os
 import shutil
 import subprocess
-from typing import Optional, Tuple
-from .controller_ui import *
+from typing import List, Optional, Tuple
+from .controller_ui import UI
 
 
 def _check_go(ui: UI) -> str:

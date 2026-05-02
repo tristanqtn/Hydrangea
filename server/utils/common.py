@@ -14,11 +14,6 @@ class ProtocolError(Exception):
     pass
 
 
-async def read_exactly(reader: asyncio.StreamReader, n: int) -> bytes:
-    data = await reader.readexactly(n)
-    return data
-
-
 async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], bytes]:
     """
     Frame format:
@@ -36,7 +31,10 @@ async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], byte
     except json.JSONDecodeError as e:
         raise ProtocolError(f"Invalid JSON header: {e}") from e
 
-    size = int(header.get("size", 0))
+    try:
+        size = int(header.get("size", 0))
+    except (ValueError, TypeError) as e:
+        raise ProtocolError(f"Invalid payload size: {e}") from e
     if size < 0:
         raise ProtocolError("Negative payload size")
     if size > 256 * 1024 * 1024:
