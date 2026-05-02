@@ -10,7 +10,7 @@ import ssl
 import sys
 import subprocess
 from datetime import datetime
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from .utils.common import write_frame, read_frame
 from .utils.go_builder import build_go_clients
@@ -25,7 +25,7 @@ from .utils.controller_ui import (
     print_server_health,
 )
 
-__version__ = "3.0"
+__version__ = "3.2"
 
 
 # ---------- wire ----------
@@ -181,61 +181,29 @@ def sp_prog(p: argparse.ArgumentParser) -> str:
     return p.prog.split()[-1]
 
 
-# Optional: minimal readline support (history + command completion for verbs)
-try:
-    import readline  # type: ignore
-
-    def _setup_readline(commands):
-        def completer(text, state):
-            options = [c for c in commands if c.startswith(text)]
-            if state < len(options):
-                return options[state]
-            return None
-
-        readline.set_completer(completer)
-        readline.parse_and_bind("tab: complete")
-        histfile = os.path.expanduser("~/.hydrangea_history")
-        try:
-            readline.read_history_file(histfile)
-        except Exception:
-            pass
-        import atexit
-
-        atexit.register(lambda: _save_history(histfile))
-
-    def _save_history(path):
-        try:
-            readline.write_history_file(path)
-        except Exception:
-            pass
-except Exception:
-    readline = None
-
-    def _setup_readline(_):
-        return
-
-
 # ---------- REPL loop ----------
 async def run_repl(args) -> None:
-    ui = UI(use_color=(not args.no_color), show_banner=(not args.no_banner), quiet=False)
-    ui.welcome(__version__, args.host, args.port)
-
     repl_parser, sub_map = build_repl_parser()
-    commands = sorted([k for k in sub_map.keys() if k not in {"help"}]) + [
-        "help", "quit", "exit",
-    ]
+    commands = sorted(k for k in sub_map.keys() if k not in {"help"})
+    commands += ["help", "quit", "exit"]
+
+    ui = UI(
+        use_color=(not args.no_color),
+        show_banner=(not args.no_banner),
+        quiet=False,
+        commands=commands,
+    )
+    ui.welcome(__version__, args.host, args.port)
 
     current_client: Optional[str] = None
     session_start = datetime.now()
     command_count = 0
 
-    _setup_readline(commands)
-
     # Pre-configure TLS once for the whole session
     _tls    = getattr(args, "tls", False)
     _tls_fp = getattr(args, "tls_fingerprint", "") or ""
 
-    async def _send(header: dict, payload: bytes = b"") -> tuple:
+    async def _send(header: dict, payload: bytes = b"") -> Tuple[Dict[str, Any], bytes]:
         """Thin wrapper that forwards TLS settings to every admin_send call."""
         try:
             return await admin_send(
@@ -261,10 +229,12 @@ async def run_repl(args) -> None:
 
     while True:
         try:
-            line = ui.prompt(current_client)
+            line = await ui.prompt(current_client)
         except (EOFError, KeyboardInterrupt):
-            ui.goodbye(command_count, session_start)
-            return
+            if await ui.confirm_exit():
+                ui.goodbye(command_count, session_start)
+                return
+            continue
 
         if not line or line.startswith("#"):
             continue
@@ -284,8 +254,10 @@ async def run_repl(args) -> None:
             continue
 
         if line.lower() in {"quit", "exit", "ciao", "bisous"}:
-            ui.goodbye(command_count, session_start)
-            return
+            if await ui.confirm_exit():
+                ui.goodbye(command_count, session_start)
+                return
+            continue
 
         command_count += 1
 

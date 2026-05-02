@@ -69,7 +69,7 @@ class ClientSession:
     def __init__(self, client_id: str, writer: asyncio.StreamWriter):
         self.client_id = client_id
         self.writer = writer
-        self.queue: "asyncio.Queue[dict]" = asyncio.Queue()
+        self.queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=256)
         self.alive = True
         self.last_seen: float = time.time()
         self.pump_task: Optional[asyncio.Task] = None
@@ -193,33 +193,18 @@ class Server:
                     log.debug(f"[{client_id}] PONG")
 
                 elif t == "RESULT_LIST_DIR":
-                    rid = header.get("req_id")
-                    if rid and rid in self.pending:
-                        fut = self.pending.pop(rid)
-                        if not fut.done():
-                            fut.set_result((header, payload))
-                    else:
+                    if not self._resolve_pending_result(header, payload):
                         log.info(
                             f"[{client_id}] LIST_DIR {header.get('path')} -> "
                             f"{header.get('entries_count', '?')} entries"
                         )
 
                 elif t == "RESULT_EXEC":
-                    rid = header.get("req_id")
-                    if rid and rid in self.pending:
-                        fut = self.pending.pop(rid)
-                        if not fut.done():
-                            fut.set_result((header, payload))
-                    else:
+                    if not self._resolve_pending_result(header, payload):
                         log.info(f"[{client_id}] EXEC result rc={header.get('rc')}")
 
                 elif t == "RESULT_SESSION_INFO":
-                    rid = header.get("req_id")
-                    if rid and rid in self.pending:
-                        fut = self.pending.pop(rid)
-                        if not fut.done():
-                            fut.set_result((header, payload))
-                    else:
+                    if not self._resolve_pending_result(header, payload):
                         log.info(f"[{client_id}] SESSION_INFO received")
 
                 elif t == "FILE":
@@ -301,6 +286,16 @@ class Server:
             if self.clients.get(client_id) is session:
                 del self.clients[client_id]
             log.info(f"Client {client_id} removed")
+
+    def _resolve_pending_result(self, header: dict, payload: bytes) -> bool:
+        """Resolve a pending future with the result. Returns True if claimed."""
+        rid = header.get("req_id")
+        if rid and rid in self.pending:
+            fut = self.pending.pop(rid)
+            if not fut.done():
+                fut.set_result((header, payload))
+            return True
+        return False
 
     async def _pump_orders(self, session: ClientSession):
         try:
@@ -699,14 +694,21 @@ async def amain():
     print()
 
     srv = Server(args.host, args.ports, args.storage, args.auth_token, ssl_ctx=ssl_ctx)
-    try:
-        await srv.start()
-    except KeyboardInterrupt:
-        print("Shutting down...")
+    await srv.start()
 
 
 def main() -> None:
-    asyncio.run(amain())
+    try:
+        asyncio.run(amain())
+    except KeyboardInterrupt:
+        try:
+            answer = input("\n  Stop the server? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            answer = ""
+        if answer not in ("n", "no"):
+            print("  Server stopped.")
+        else:
+            print("  Cannot resume after interrupt — please restart the server.")
 
 
 if __name__ == "__main__":

@@ -93,7 +93,11 @@ func readFrame(conn net.Conn) (Header, []byte, error) {
 	case float64:
 		size = int(v)
 	case string:
-		size, _ = strconv.Atoi(v)
+		var err error
+		size, err = strconv.Atoi(v)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid payload size %q: %w", v, err)
+		}
 	}
 	if size > 256*1024*1024 {
 		return nil, nil, fmt.Errorf("payload too large: %d bytes (max 256 MiB)", size)
@@ -261,7 +265,11 @@ func handleList(conn net.Conn, root string, hdr Header) {
 			Mtime: info.ModTime().Unix(),
 		})
 	}
-	payload, _ := json.Marshal(ents)
+	payload, err := json.Marshal(ents)
+	if err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("LIST_DIR: marshal failed: %v", err)}, nil)
+		return
+	}
 	h := Header{"type": "RESULT_LIST_DIR"}
 	if reqID != "" {
 		h["req_id"] = reqID
@@ -486,23 +494,23 @@ func handlePortForward(conn net.Conn, root string, hdr Header, _ []byte) {
 	if runtime.GOOS != "windows" {
 		_ = os.Chmod(target, 0o755)
 	}
-        connectArgs, _ := hdr["connect_args"].(string)
-        connectArgs = strings.TrimSpace(connectArgs)
-        if connectArgs == "" {
-                _ = writeFrame(conn, Header{"type": "LOG", "message": "PORT_FORWARD: missing connect_args"}, nil)
-                return
-        }
-        args := append([]string{"--connect"}, strings.Fields(connectArgs)...)
-        cmd := exec.Command(target, args...)
-        cmd.Stdin = nil
-        cmd.Stdout = nil
-        cmd.Stderr = nil
-        if err := cmd.Start(); err != nil {
-                _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: start failed: %v", err)}, nil)
-                return
-        }
-        _ = cmd.Process.Release()
-        _ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: started %s", target)}, nil)
+	connectArgs, _ := hdr["connect_args"].(string)
+	connectArgs = strings.TrimSpace(connectArgs)
+	if connectArgs == "" {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": "PORT_FORWARD: missing connect_args"}, nil)
+		return
+	}
+	args := append([]string{"--connect"}, strings.Fields(connectArgs)...)
+	cmd := exec.Command(target, args...)
+	cmd.Stdin = nil
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Start(); err != nil {
+		_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: start failed: %v", err)}, nil)
+		return
+	}
+	_ = cmd.Process.Release()
+	_ = writeFrame(conn, Header{"type": "LOG", "message": fmt.Sprintf("PORT_FORWARD: started %s", target)}, nil)
 }
 
 // ---------- device info functionality ----------

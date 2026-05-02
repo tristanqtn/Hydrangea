@@ -8,6 +8,8 @@ packages = [{ include = "server" }]
 
 [tool.poetry.dependencies]
 python = "^3.10"
+rich           = ">=13.0"
+prompt_toolkit = ">=3.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = ">=0.5.0"
