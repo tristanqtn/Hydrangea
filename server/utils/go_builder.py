@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import List, Optional, Tuple
+
 from .controller_ui import UI
 
 _MIN_GO = (1, 23)
@@ -50,14 +50,12 @@ def _build_one(
     host: str,
     port: int,
     token: str,
-    client_id: Optional[str],
+    client_id: str | None,
     tls_enabled: bool = False,
     tls_fingerprint: str = "",
 ) -> str:
     os.makedirs(out_dir, exist_ok=True)
-    out_name = f"hydrangea-client-{goos}-{goarch}" + (
-        ".exe" if goos == "windows" else ""
-    )
+    out_name = f"hydrangea-client-{goos}-{goarch}" + (".exe" if goos == "windows" else "")
     out_path = os.path.join(out_dir, out_name)
 
     # Inject build-time defaults into the Go variables with -ldflags -X
@@ -82,8 +80,7 @@ def _build_one(
         cmd,
         cwd=src_root,
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
@@ -99,13 +96,15 @@ def build_go_clients(ui: UI, args, agent_path: str = ""):
         src_root = os.path.abspath(agent_path)
     else:
         ui.rule(" build go client from default path ")
-        src_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "client", "go"))
+        src_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "client", "go")
+        )
 
     _ensure_go_sources_exist(ui, src_root)
     go_bin = _check_go(ui)
 
     # targets
-    targets: List[Tuple[str, str]] = []
+    targets: list[tuple[str, str]] = []
     if not args.os:
         targets = [("linux", args.arch), ("windows", args.arch)]
     else:
@@ -118,7 +117,9 @@ def build_go_clients(ui: UI, args, agent_path: str = ""):
     out_dir = os.path.abspath(args.out)
 
     built = []
-    build_tls = getattr(args, "build_tls", False) or bool(getattr(args, "build_tls_fingerprint", ""))
+    build_tls = getattr(args, "build_tls", False) or bool(
+        getattr(args, "build_tls_fingerprint", "")
+    )
     build_tls_fp = getattr(args, "build_tls_fingerprint", "") or ""
     for goos, goarch in targets:
         p = _build_one(

