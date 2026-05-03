@@ -23,6 +23,7 @@ from .utils.controller_ui import (
     print_session,
     print_clients,
     print_server_health,
+    print_server_config,
 )
 
 __version__ = "4.0"
@@ -180,6 +181,22 @@ def build_repl_parser() -> Tuple[
     sp = sub.add_parser("server-exec", help="Run a shell command on the server host")
     sp.add_argument("--command", required=True, help="Command to run on the server machine")
     sp.add_argument("--timeout", type=float, default=30.0, help="Seconds to wait (default: 30)")
+
+    sp = sub.add_parser("add-agent-token", help="Register a new agent auth token on the server")
+    sp.add_argument("--token", required=True, help="Token to register")
+    sp.add_argument(
+        "--port", type=int, default=None,
+        help="Bind token exclusively to this agent port (default: add to global set)",
+    )
+
+    sp = sub.add_parser("add-agent-port", help="Open a new agent listening port on the server")
+    sp.add_argument("--port", type=int, required=True, help="Port number to open")
+    sp.add_argument(
+        "--token", default=None,
+        help="Bind a token exclusively to this port (optional; uses global tokens if omitted)",
+    )
+
+    sub.add_parser("server-config", help="Show server port and token configuration")
 
     sp = sub.add_parser("local", help="Run a local shell command")
     sp.add_argument("local_command", help="Local command to run")
@@ -518,6 +535,45 @@ async def run_repl(args) -> None:
             print_exec(ui, "server", resp, payload)
             continue
 
+        if cmd == "add-agent-token":
+            resp, _ = await _send({
+                "action": "add_agent_token",
+                "agent_token": ns.token,
+                "port": ns.port,
+            })
+            if resp.get("type") == "OK":
+                if resp.get("scope") == "port":
+                    ui.success(
+                        f"Token registered on :{resp.get('port')}  "
+                        f"(that port is now exclusive to its bound tokens)"
+                    )
+                else:
+                    ui.success("Token added to global agent token set")
+            else:
+                print_error(ui, resp)
+            continue
+
+        if cmd == "add-agent-port":
+            resp, _ = await _send({
+                "action": "add_agent_port",
+                "port": ns.port,
+                "agent_token": ns.token,
+            })
+            if resp.get("type") == "OK":
+                binding = resp.get("token_binding", "global")
+                ui.success(
+                    f"Agent port :{ns.port} opened  "
+                    f"[muted]({binding} token binding)[/muted]"
+                )
+            else:
+                print_error(ui, resp)
+            continue
+
+        if cmd == "server-config":
+            resp, _ = await _send({"action": "server_config"})
+            print_server_config(ui, resp)
+            continue
+
         if cmd == "local":
             try:
                 proc = subprocess.Popen(ns.local_command, shell=True)
@@ -540,20 +596,23 @@ async def run_repl(args) -> None:
 
 def start_server(args):
     ui = UI(use_color=(not args.no_color), show_banner=False, quiet=args.quiet)
+    agent_port = args.port + 1
     ui.rule(" start server ")
-    ui.kv("Host", args.host)
-    ui.kv("Port", args.port)
+    ui.kv("Admin port", f":{args.port}  (controller)")
+    ui.kv("Agent port", f":{agent_port}  (beacons)")
     ui.rule()
     cmd = [
         sys.executable,
         os.path.join(os.path.dirname(__file__), "server.py"),
         "--host", args.host,
-        "--ports", str(args.port),   # server uses --ports (plural)
-        "--auth-token", args.auth_token,
+        "--admin-port", str(args.port),
+        "--ports", str(agent_port),
+        "--admin-token", args.auth_token,
+        "--agent-token", args.auth_token,
     ]
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        ui.success(f"Server process started (PID {proc.pid})")
+        ui.success(f"Server started (PID {proc.pid}) — connect agents to :{agent_port}")
     except Exception as e:
         ui.error(f"Failed to start server: {e}")
     ui.rule()

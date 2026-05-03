@@ -232,24 +232,28 @@ class UI:
             ("Files",  ["list", "pull", "push"]),
             ("Exec",   ["exec", "reverse-shell", "port-forward"]),
             ("Build",  ["build-client"]),
-            ("Server", ["server-status", "server-exec", "local"]),
+            ("Server", ["server-status", "server-config", "server-exec",
+                        "add-agent-token", "add-agent-port", "local"]),
         ]
         descs: Dict[str, str] = {
-            "clients":       "List connected clients",
-            "use":           "Set active client context",
-            "unuse":         "Clear active client context",
-            "ping":          "Ping a client",
-            "session":       "Get session info from client",
-            "list":          "List directory on client",
-            "pull":          "Pull file from client to server",
-            "push":          "Push local file to client",
-            "exec":          "Run a command on client",
-            "reverse-shell": "Start a reverse shell",
-            "port-forward":  "Upload and run Ligolo agent",
-            "build-client":  "Compile Go clients",
-            "server-status": "Server health status",
-            "server-exec":   "Run a command on the server host",
-            "local":         "Run a command locally (controller machine)",
+            "clients":         "List connected clients",
+            "use":             "Set active client context",
+            "unuse":           "Clear active client context",
+            "ping":            "Ping a client",
+            "session":         "Get session info from client",
+            "list":            "List directory on client",
+            "pull":            "Pull file from client to server",
+            "push":            "Push local file to client",
+            "exec":            "Run a command on client",
+            "reverse-shell":   "Start a reverse shell",
+            "port-forward":    "Upload and run Ligolo agent",
+            "build-client":    "Compile Go clients",
+            "server-status":   "Server health and recent logs",
+            "server-config":   "Show port / token configuration",
+            "server-exec":     "Run a command on the server host",
+            "add-agent-token": "Register a new agent token (global or port-bound)",
+            "add-agent-port":  "Open a new agent listening port at runtime",
+            "local":           "Run a command locally (controller machine)",
         }
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         t.add_column(style="accent", no_wrap=True)
@@ -307,15 +311,23 @@ def print_queued(ui: UI, resp: dict) -> None:
     ui._con.print(f"{ui.TAG_QUE} queued [hi]{order}[/hi][muted]{tail}[/muted]")
 
 
-def print_clients(ui: UI, clients: List[str]) -> None:
+def print_clients(ui: UI, clients: List[Any]) -> None:
     if not clients:
         ui._con.print("\n  [muted]no clients connected[/]\n")
         return
     t = Table(box=box.SIMPLE, show_header=True, header_style="muted", padding=(0, 1))
     t.add_column("id", style="info")
+    t.add_column("srv port", style="accent", no_wrap=True)
+    t.add_column("beacon addr", style="muted", no_wrap=True)
     t.add_column("status")
-    for cid in clients:
-        t.add_row(cid, "[ok]● online[/ok]")
+    for entry in clients:
+        if isinstance(entry, dict):
+            cid = entry.get("id", "?")
+            port = f":{entry.get('port', '?')}"
+            peer = entry.get("peer", "?")
+        else:
+            cid, port, peer = str(entry), "?", "?"
+        t.add_row(cid, port, peer, "[ok]● online[/ok]")
     ui._con.print()
     ui._con.print(t)
 
@@ -429,4 +441,48 @@ def print_server_health(ui: UI, resp: dict) -> None:
         ui.rule("recent logs")
         for entry in logs[-5:]:
             ui._con.print(f"  [muted]{entry}[/muted]")
+    ui._con.print()
+
+
+def print_server_config(ui: UI, resp: dict) -> None:
+    if resp.get("type") != "SERVER_CONFIG":
+        print_error(ui, resp)
+        return
+
+    ui.rule("server config")
+
+    t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+    t.add_column(style="accent", no_wrap=True)
+    t.add_column()
+    t.add_row("admin port", f":{resp.get('admin_port', '?')}  [muted](controller only)[/muted]")
+
+    agent_ports = resp.get("agent_ports", [])
+    bound_ports = set(int(p) for p in resp.get("port_bindings", {}).keys())
+    port_cells = []
+    for p in agent_ports:
+        marker = "  [muted](exclusive)[/muted]" if p in bound_ports else ""
+        port_cells.append(f":{p}{marker}")
+    t.add_row("agent ports", "\n".join(port_cells) if port_cells else "[muted](none)[/muted]")
+
+    global_tokens = resp.get("global_tokens", [])
+    t.add_row(
+        "global tokens",
+        "  ".join(f"[info]{tok}[/info]" for tok in global_tokens)
+        if global_tokens else "[muted](none)[/muted]",
+    )
+    ui._con.print(t)
+
+    bindings = resp.get("port_bindings", {})
+    if bindings:
+        ui.rule("port-bound tokens")
+        bt = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
+        bt.add_column(style="cyan", no_wrap=True)
+        bt.add_column()
+        for port_str, tokens in sorted(bindings.items(), key=lambda x: int(x[0])):
+            bt.add_row(
+                f":{port_str}",
+                "  ".join(f"[info]{tok}[/info]" for tok in tokens),
+            )
+        ui._con.print(bt)
+
     ui._con.print()
