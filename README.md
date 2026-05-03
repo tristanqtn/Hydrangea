@@ -11,7 +11,7 @@
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀
                                       ███    ███
 
-              Hydrangea C2 •  V3.2
+              Hydrangea C2 •  V4.0
 ```
 
 Hydrangea is a modular command-and-control (C2) framework designed for simple and reliable post-exploitation fleet management. It features a Python-based server and controller, plus a Go client agent, enabling efficient management of multiple endpoints over TCP. Hydrangea supports **file transfers**, **remote command execution**, **reverse shell management**, **port forwarding**, and more, all with a focus on clarity, minimalism, and explicit control. Intended for trusted environments, it emphasizes ease of use, extensibility, and security best practices.
@@ -55,7 +55,7 @@ Hydrangea C2 has three parts:
 ## Disclaimer
 
 > [!CAUTION]
-> Hydrangea C2 is provided **solely for lawful, authorized use** — such as lab work, education, internal administration, and environments where you **own or have explicit permission** to manage the systems involved. Using this software to access, monitor, or modify computers **without consent** may violate laws and regulations. **You are responsible** for complying with all applicable laws, policies, and contractual obligations. The authors and distributors **do not accept liability** for misuse, damage, loss of data, or any consequences arising from the use of this software. Use responsibly.
+> Hydrangea C2 is provided **solely for lawful, authorized use** — such as lab work, education, and environments where you **own or have explicit permission** to manage the systems involved. Using this software to access, monitor, or modify computers **without consent** may violate laws and regulations. **You are responsible** for complying with all applicable laws, policies, and contractual obligations. The authors and distributors **do not accept liability** for misuse, damage, loss of data, or any consequences arising from the use of this software. Use responsibly.
 
 ---
 
@@ -68,7 +68,7 @@ Hydrangea C2 has three parts:
 
 - Transport: custom **length-prefixed binary frame** — 4-byte big-endian header length → UTF-8 JSON header → optional binary payload.
 - The server accepts both admin (controller) and agent connections on the same ports, distinguished by the initial handshake type.
-- Async responses (`list --wait`, `exec`, `session`) are correlated with a `req_id` UUID so multiple in-flight requests can coexist.
+- Async responses (`list`, `exec`, `session`) are correlated with a `req_id` UUID so multiple in-flight requests can coexist.
 - Keepalive: server PINGs every 30 s, evicts agents silent for 90 s.
 
 ---
@@ -80,7 +80,7 @@ Hydrangea C2 has three parts:
 | Component | Requirement |
 |---|---|
 | Server & Controller | Python **3.10+**, [Poetry](https://python-poetry.org/) |
-| Go agent (build) | Go **1.21+** |
+| Go agent (build) | Go **1.23+** |
 | Go agent (cross-compile) | [Nix](https://nixos.org/) |
 | TLS auto-cert | `openssl` in `PATH` |
 
@@ -159,7 +159,7 @@ hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9000 \
 cd client/go
 
 # Plain build
-go build -o hydrangea-agent .
+go build -o hydrangea-client .
 
 # With baked-in defaults
 go build \
@@ -167,7 +167,7 @@ go build \
             -X main.DefaultServerPort=9000 \
             -X main.DefaultAuthToken=supersecret \
             -X main.DefaultClientID=target-1" \
-  -o hydrangea-agent .
+  -o hydrangea-client .
 
 # Cross-compile via Nix
 nix build ".#hydrangea-client-linux"
@@ -177,14 +177,14 @@ nix build ".#hydrangea-client-windows"
 **Run the agent on the target:**
 
 ```bash
-./hydrangea-agent --server 10.0.0.1 --port 9000 --auth-token supersecret --client-id target-1
+./hydrangea-client --server 10.0.0.1 --port 9000 --auth-token supersecret --client-id target-1
 
 # With TLS (fingerprint pins the self-signed cert)
-./hydrangea-agent --server 10.0.0.1 --port 9000 --auth-token supersecret \
+./hydrangea-client --server 10.0.0.1 --port 9000 --auth-token supersecret \
   --tls --tls-fingerprint <hex>
 
 # Additional flags
-./hydrangea-agent ... [--persist] [--debug] [--device-info] [--test-connection]
+./hydrangea-client ... [--persist] [--debug] [--device-info] [--test-connection]
 ```
 
 > The **auth token** must match across server, controller, and all agents.
@@ -224,14 +224,14 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn't impl
 | Command | Description |
 |---|---|
 | `clients` | List all connected agent IDs |
-| `ping [--client <id>]` | Send a ping (fire and forget) |
+| `ping [--client <id>] [--timeout <s>]` | Ping a client and display round-trip time in ms |
 | `session [--client <id>]` | Fetch OS, user, PID, cwd, and runtime info |
 
 ### Files
 
 | Command | Description |
 |---|---|
-| `list [--client <id>] [--path <p>] [--wait] [--timeout <s>]` | List a directory on the agent. `--wait` blocks and renders the result; without it the order is queued and logged server-side. |
+| `list [--client <id>] [--path <p>] [--timeout <s>] [--no-wait]` | List a directory on the agent. Results are shown immediately by default; `--no-wait` queues the order and logs the result server-side only. |
 | `pull [--client <id>] --src <agent_path> --dest <server_path>` | Pull a file from the agent to the server. Relative `--dest` lands under `server_storage/<client_id>/`; absolute paths are written exactly there. |
 | `push [--client <id>] --src <local_path> --dest <agent_path>` | Push a local file to the agent. |
 
