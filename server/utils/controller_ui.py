@@ -232,7 +232,7 @@ class UI:
             ("Files",  ["list", "pull", "push"]),
             ("Exec",   ["exec", "reverse-shell", "port-forward"]),
             ("Build",  ["build-client"]),
-            ("Server", ["server-status", "local"]),
+            ("Server", ["server-status", "server-exec", "local"]),
         ]
         descs: Dict[str, str] = {
             "clients":       "List connected clients",
@@ -248,7 +248,8 @@ class UI:
             "port-forward":  "Upload and run Ligolo agent",
             "build-client":  "Compile Go clients",
             "server-status": "Server health status",
-            "local":         "Run a local command",
+            "server-exec":   "Run a command on the server host",
+            "local":         "Run a command locally (controller machine)",
         }
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         t.add_column(style="accent", no_wrap=True)
