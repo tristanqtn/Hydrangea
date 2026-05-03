@@ -25,7 +25,7 @@ from .utils.controller_ui import (
     print_server_health,
 )
 
-__version__ = "3.2"
+__version__ = "4.0"
 
 
 # ---------- wire ----------
@@ -88,15 +88,16 @@ def build_repl_parser() -> Tuple[
     # regular commands (client optional in REPL; will use active context)
     sub.add_parser("clients", help="List connected clients")
 
-    sp = sub.add_parser("ping", help="Ping a client")
+    sp = sub.add_parser("ping", help="Ping a client and display round-trip time")
     sp.add_argument("--client", required=False)
+    sp.add_argument("--timeout", type=float, default=5.0, help="Seconds to wait for PONG (default: 5)")
 
     sp = sub.add_parser("list", help="List directory on client")
     sp.add_argument("--client", required=False)
     sp.add_argument("--path", default=".")
-    sp.add_argument("--wait", action="store_true", help="Wait for result and render")
+    sp.add_argument("--no-wait", action="store_true", help="Queue the order without waiting for result")
     sp.add_argument(
-        "--timeout", type=float, default=10.0, help="Seconds to wait when --wait"
+        "--timeout", type=float, default=10.0, help="Seconds to wait for result (default: 10)"
     )
 
     sp = sub.add_parser("pull", help="Pull a file from client to server")
@@ -124,7 +125,7 @@ def build_repl_parser() -> Tuple[
 
     sp = sub.add_parser("session", help="Fetch session info from client")
     sp.add_argument("--client", required=False)
-    sp.add_argument("--timeout", type=float, default=1)
+    sp.add_argument("--timeout", type=float, default=10.0)
 
     # build-client (REPL)
     sp = sub.add_parser(
@@ -310,9 +311,10 @@ async def run_repl(args) -> None:
             if not target:
                 ui.show_no_client_error()
                 continue
-            resp, _ = await _send({"action": "ping", "target_id": target})
-            if resp.get("type") == "OK":
-                ui.success(f"Ping sent to {ui.c(target, 'cyan')}")
+            resp, _ = await _send({"action": "ping", "target_id": target, "timeout": ns.timeout})
+            if resp.get("type") == "PONG":
+                rtt = resp.get("rtt_ms", "?")
+                ui.success(f"Pong from {ui.c(target, 'cyan')}  ({rtt} ms)")
             else:
                 print_error(ui, resp)
             continue
@@ -323,14 +325,15 @@ async def run_repl(args) -> None:
             if not target:
                 ui.show_no_client_error()
                 continue
+            wait = not ns.no_wait
             resp, payload = await _send({
                 "action": "list",
                 "target_id": target,
                 "path": ns.path,
-                "wait": ns.wait,
+                "wait": wait,
                 "timeout": ns.timeout,
             })
-            if ns.wait:
+            if wait:
                 print_list(ui, ns.path, resp, payload)
             else:
                 print_queued(ui, resp)
