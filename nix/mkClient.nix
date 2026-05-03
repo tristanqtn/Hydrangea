@@ -5,7 +5,7 @@ target:
     inherit version;
     inherit src;
     modRoot = "client/go";
-    # Required to unsure dependacy are consistent
+    # Required to ensure dependencies are consistent
     vendorHash = "sha256-y5DvzFpXa2a2+ZZmM+JUhfjdrxpSR9gIj/JPOvKhAd4=";
 
     env.CGO_ENABLED = "0";
@@ -16,6 +16,8 @@ target:
       for f in $out/bin/*; do
         if [ "${target}" = "mingwW64" ]; then
           mv "$f" "$out/bin/hydrangea-client-Windows64-${version}.exe"
+        elif [ "${target}" = "aarch64-multiplatform" ]; then
+          mv "$f" "$out/bin/hydrangea-client-LinuxARM64-${version}"
         else
           mv "$f" "$out/bin/hydrangea-client-Linux64-${version}"
         fi

@@ -44,6 +44,8 @@ Full documentation: [Wiki](https://github.com/tristanqtn/Hydrangea-C2/wiki)
 poetry install
 ```
 
+If you have [Nix](https://nixos.org/) with flakes enabled, no installation is required — see [Running with Nix](#running-with-nix) below.
+
 ---
 
 ## Running
@@ -98,6 +100,26 @@ hydrangea ❯  serve-files --path ./dist
 # On target
 ./hydrangea-client --server 10.0.0.1 --port 9001 --auth-token <beacon-secret>
 ```
+
+---
+
+## Running with Nix
+
+With [Nix](https://nixos.org/) and flakes enabled, the server and controller can be run directly without installing Python or Poetry:
+
+```bash
+# Server
+nix run github:tristanqtn/Hydrangea-C2#hydrangea-server -- \
+  --admin-port 9000 --ports 9001 \
+  --admin-token <ctl-secret> --agent-token <beacon-secret>
+
+# Controller
+nix run github:tristanqtn/Hydrangea-C2#hydrangea-ctl -- \
+  --port 9000 --auth-token <ctl-secret>
+```
+
+From a local clone, replace `github:tristanqtn/Hydrangea-C2` with `.`.
+Go agents can be cross-compiled with `nix build .#hydrangea-client-linux` and `nix build .#hydrangea-client-windows`.
 
 ---
 
