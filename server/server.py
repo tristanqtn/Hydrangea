@@ -13,7 +13,7 @@ import uuid
 from typing import Any, Dict, Optional, Set
 import logging.handlers
 
-__version__ = "3.2"
+__version__ = "4.0"
 
 from .utils.common import read_frame, write_frame, ProtocolError, safe_join
 
@@ -39,15 +39,19 @@ def _gen_self_signed_cert(cert_path: str, key_path: str) -> None:
             "openssl not found in PATH. "
             "Provide --tls-cert and --tls-key manually, or install openssl."
         )
-    subprocess.run(
-        [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", key_path, "-out", cert_path,
-            "-days", "3650", "-subj", "/CN=hydrangea-c2",
-        ],
-        check=True,
-        capture_output=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                "-keyout", key_path, "-out", cert_path,
+                "-days", "3650", "-subj", "/CN=hydrangea-c2",
+            ],
+            check=True,
+            capture_output=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr.decode(errors="replace").strip()
+        raise RuntimeError(f"openssl failed to generate certificate: {stderr}") from exc
     log.info(f"Generated TLS certificate: {cert_path}  key: {key_path}")
 
 
@@ -190,7 +194,8 @@ class Server:
                 session.last_seen = time.time()
                 t = header.get("type")
                 if t == "PONG":
-                    log.debug(f"[{client_id}] PONG")
+                    if not self._resolve_pending_result(header, payload):
+                        log.debug(f"[{client_id}] PONG (keepalive)")
 
                 elif t == "RESULT_LIST_DIR":
                     if not self._resolve_pending_result(header, payload):
@@ -395,10 +400,25 @@ class Server:
         if action == "ping":
             if not target or target not in self.clients:
                 await write_frame(writer, {"type": "ERROR", "error": "unknown_target"})
-            else:
-                session = self.clients[target]
-                await write_frame(session.writer, {"type": "PING"})
-                await write_frame(writer, {"type": "OK"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            session = self.clients[target]
+            timeout = float(header.get("timeout", 5.0))
+            req_id = uuid.uuid4().hex
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            self.pending[req_id] = fut
+            self.client_futures.setdefault(target, set()).add(req_id)
+            await session.queue.put({"header": {"type": "PING", "req_id": req_id}})
+            t_start = time.monotonic()
+            try:
+                await asyncio.wait_for(fut, timeout=timeout)
+                rtt_ms = int((time.monotonic() - t_start) * 1000)
+                await write_frame(writer, {"type": "PONG", "client_id": target, "rtt_ms": rtt_ms})
+            except asyncio.TimeoutError:
+                await write_frame(writer, {"type": "ERROR", "error": "timeout"})
+            finally:
+                self.pending.pop(req_id, None)
             writer.close()
             await writer.wait_closed()
             return
@@ -636,7 +656,7 @@ art = r"""
   ███    █▀     ▀█████▀  ████████▀    ███    ███   ███    █▀   ▀█   █▀    ████████▀    ██████████   ███    █▀        ▄████████▀    ██████████   ███    ███  ▀██████▀    ██████████   ███    ███ 
                                       ███    ███                                                                                                ███    ███                           ███    ███ 
 
-              Hydrangea C2 Server
+              Hydrangea C2  •  Server
 """
 
 
@@ -672,12 +692,19 @@ async def amain():
     if args.tls_auto or (args.tls_cert and args.tls_key):
         cert_path = args.tls_cert or "hydrangea.crt"
         key_path  = args.tls_key  or "hydrangea.key"
-        if args.tls_auto and (
-            not os.path.exists(cert_path) or not os.path.exists(key_path)
-        ):
-            _gen_self_signed_cert(cert_path, key_path)
-        ssl_ctx = _make_ssl_context(cert_path, key_path)
-        tls_fingerprint = _cert_fingerprint(cert_path)
+        try:
+            if args.tls_auto and (
+                not os.path.exists(cert_path) or not os.path.exists(key_path)
+            ):
+                _gen_self_signed_cert(cert_path, key_path)
+            ssl_ctx = _make_ssl_context(cert_path, key_path)
+            tls_fingerprint = _cert_fingerprint(cert_path)
+        except RuntimeError as exc:
+            print(f"\n  [error] {exc}\n")
+            raise SystemExit(1) from exc
+        except (ssl.SSLError, OSError) as exc:
+            print(f"\n  [error] TLS setup failed: {exc}\n")
+            raise SystemExit(1) from exc
 
     # ── banner ────────────────────────────────────────────────────────────────
     print(art)

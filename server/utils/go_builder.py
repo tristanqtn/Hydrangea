@@ -1,16 +1,31 @@
 #!/usr/bin/env python3
 
 import os
+import re
 import shutil
 import subprocess
 from typing import List, Optional, Tuple
 from .controller_ui import UI
 
+_MIN_GO = (1, 23)
+
 
 def _check_go(ui: UI) -> str:
     go = shutil.which("go")
     if not go:
-        raise RuntimeError("Go toolchain not found in PATH. Install Go >= 1.21.")
+        raise RuntimeError(
+            "Go toolchain not found in PATH.\n"
+            f"  Install Go >= {_MIN_GO[0]}.{_MIN_GO[1]} from https://go.dev/dl/"
+        )
+    result = subprocess.run([go, "version"], capture_output=True, text=True)
+    m = re.search(r"go(\d+)\.(\d+)", result.stdout)
+    if m:
+        major, minor = int(m.group(1)), int(m.group(2))
+        if (major, minor) < _MIN_GO:
+            raise RuntimeError(
+                f"Go {major}.{minor} found but Go >= {_MIN_GO[0]}.{_MIN_GO[1]} is required.\n"
+                f"  Update from https://go.dev/dl/"
+            )
     return go
 
 
