@@ -86,6 +86,8 @@ class ClientSession:
         self.writer = writer
         self.port = port
         self.peer = peer
+        self.user: str = "?"
+        self.hostname: str = "?"
         self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
         self.alive = True
         self.last_seen: float = time.time()
@@ -106,12 +108,16 @@ class Server:
         self.host = host
         self.admin_port = admin_port
         self.agent_ports: list[int] = list(agent_ports)
+        # Ports present at startup — never removable at runtime.
+        self.startup_agent_ports: frozenset[int] = frozenset(agent_ports)
         self.storage = storage
         self.admin_token = admin_token
         self.agent_tokens: set = set(agent_tokens)
         # Per-port exclusive token sets. When a port has an entry here, ONLY those
         # tokens are accepted on that port (global agent_tokens are bypassed).
         self.port_token_map: dict[int, set] = {}
+        # Maps agent port number → asyncio.Server object for dynamic close.
+        self.port_server_map: dict[int, asyncio.base_events.Server] = {}
         self.ssl_ctx = ssl_ctx
         os.makedirs(self.storage, exist_ok=True)
         self.clients: dict[str, ClientSession] = {}
@@ -153,6 +159,7 @@ class Server:
                 _make_agent_handler(port), self.host, port, ssl=self.ssl_ctx
             )
             self.servers.append(srv)
+            self.port_server_map[port] = srv
             log.info(f"Agent port listening on :{port}")
 
         asyncio.create_task(self._keepalive_loop())
@@ -261,6 +268,29 @@ class Server:
         # Start a task to pump orders to client; store ref for clean cancellation
         session.pump_task = asyncio.create_task(self._pump_orders(session))
 
+        # Automatically request SESSION_INFO after registration so user/hostname
+        # are populated in the clients list without requiring a manual 'session' call.
+        async def _auto_session():
+            await asyncio.sleep(0.5)
+            if self.clients.get(client_id) is not session:
+                return
+            req_id = uuid.uuid4().hex
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            self.pending[req_id] = fut
+            self.client_futures.setdefault(client_id, set()).add(req_id)
+            await session.queue.put({"header": {"type": "SESSION_INFO", "req_id": req_id}})
+            try:
+                _, res_payload = await asyncio.wait_for(fut, timeout=10.0)
+                info = json.loads(res_payload.decode()) if res_payload else {}
+                session.user = info.get("user", "?")
+                session.hostname = info.get("hostname", "?")
+            except Exception:
+                pass
+            finally:
+                self.pending.pop(req_id, None)
+
+        asyncio.create_task(_auto_session())
+
         try:
             while not reader.at_eof():
                 header, payload = await read_frame(reader)
@@ -295,11 +325,13 @@ class Server:
                         _i = json.loads(payload.decode()) if payload else {}
                     except Exception:
                         _i = {}
+                    session.user = _i.get("user", session.user)
+                    session.hostname = _i.get("hostname", session.hostname)
                     self._resolve_pending_result(header, payload)
                     log.info(
                         f"[{client_id}] SESSION_INFO"
-                        f"  hostname={_i.get('hostname', '?')!r}"
-                        f"  user={_i.get('user', '?')!r}"
+                        f"  hostname={session.hostname!r}"
+                        f"  user={session.user!r}"
                         f"  system={_i.get('system', '?')!r}"
                     )
 
@@ -466,6 +498,8 @@ class Server:
             "server_exec",
             "add_agent_token",
             "add_agent_port",
+            "remove_agent_token",
+            "remove_agent_port",
             "server_config",
         }:
             await write_frame(writer, {"type": "ERROR", "error": "unknown_admin_action"})
@@ -479,7 +513,13 @@ class Server:
                 {
                     "type": "CLIENTS",
                     "clients": [
-                        {"id": s.client_id, "port": s.port, "peer": s.peer}
+                        {
+                            "id": s.client_id,
+                            "port": s.port,
+                            "peer": s.peer,
+                            "user": s.user,
+                            "hostname": s.hostname,
+                        }
                         for s in self.clients.values()
                     ],
                 },
@@ -621,6 +661,7 @@ class Server:
                     _make_dyn_handler(new_port), self.host, new_port, ssl=self.ssl_ctx
                 )
                 self.servers.append(srv)
+                self.port_server_map[new_port] = srv
                 asyncio.create_task(srv.serve_forever())
                 self.agent_ports.append(new_port)
                 if bind_token:
@@ -645,6 +686,96 @@ class Server:
             await writer.wait_closed()
             return
 
+        if action == "remove_agent_token":
+            token = header.get("agent_token")
+            if not token:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_token"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            rm_port = header.get("port")
+            if rm_port is not None:
+                rm_port = int(rm_port)
+                if rm_port not in self.agent_ports:
+                    await write_frame(writer, {"type": "ERROR", "error": "unknown_agent_port"})
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                port_set = self.port_token_map.get(rm_port)
+                if port_set is None or token not in port_set:
+                    await write_frame(writer, {"type": "ERROR", "error": "token_not_found"})
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                port_set.discard(token)
+                if not port_set:
+                    del self.port_token_map[rm_port]
+                    log.info(f"Token removed from :{rm_port} exclusive set (now uses global tokens)")
+                else:
+                    log.info(f"Token removed from :{rm_port} exclusive set")
+                await write_frame(writer, {"type": "OK", "scope": "port", "port": rm_port})
+            else:
+                if token not in self.agent_tokens:
+                    await write_frame(writer, {"type": "ERROR", "error": "token_not_found"})
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                self.agent_tokens.discard(token)
+                log.info("Token removed from global agent token set")
+                await write_frame(writer, {"type": "OK", "scope": "global"})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "remove_agent_port":
+            rm_port = header.get("port")
+            if not rm_port:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_port"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            rm_port = int(rm_port)
+            if rm_port == self.admin_port:
+                log.warning(f"Rejected attempt to close admin port :{self.admin_port}")
+                await write_frame(writer, {"type": "ERROR", "error": "cannot_remove_admin_port"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            if rm_port in self.startup_agent_ports:
+                log.warning(f"Rejected attempt to close startup agent port :{rm_port}")
+                await write_frame(writer, {"type": "ERROR", "error": "cannot_remove_startup_port"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            if rm_port not in self.agent_ports:
+                await write_frame(writer, {"type": "ERROR", "error": "unknown_agent_port"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            evicted: list[str] = []
+            for cid, sess in list(self.clients.items()):
+                if sess.port == rm_port:
+                    evicted.append(cid)
+                    sess.alive = False
+                    try:
+                        sess.writer.close()
+                    except Exception:
+                        pass
+            srv = self.port_server_map.pop(rm_port, None)
+            if srv:
+                srv.close()
+            self.agent_ports.remove(rm_port)
+            self.port_token_map.pop(rm_port, None)
+            log.info(f"Agent port :{rm_port} closed (evicted {len(evicted)} client(s))")
+            await write_frame(writer, {
+                "type": "OK",
+                "port": rm_port,
+                "evicted_clients": evicted,
+            })
+            writer.close()
+            await writer.wait_closed()
+            return
+
         if action == "server_config":
 
             def _mask(t: str) -> str:
@@ -654,6 +785,7 @@ class Server:
                 "type": "SERVER_CONFIG",
                 "admin_port": self.admin_port,
                 "agent_ports": self.agent_ports,
+                "startup_agent_ports": sorted(self.startup_agent_ports),
                 "global_tokens": sorted(_mask(t) for t in self.agent_tokens),
                 "port_bindings": {
                     str(p): sorted(_mask(t) for t in tokens)
