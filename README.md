@@ -96,17 +96,26 @@ This installs the `hydrangea` package and its dependencies (`rich`, `prompt_tool
 ### 2 — Start the server
 
 ```bash
-# Plain TCP, single port
-poetry run hydrangea-server --ports 9000 --auth-token supersecret
+# Separate admin and agent ports, single agent token
+poetry run hydrangea-server \
+  --admin-port 9000 --ports 9001 \
+  --admin-token admin-secret --agent-token beacon-token
 
-# Multiple ports
-poetry run hydrangea-server --ports 9000 9001 --storage ./loot --auth-token supersecret
+# Multiple agent ports, multiple agent tokens (one per team or per implant)
+poetry run hydrangea-server \
+  --admin-port 9000 --ports 9001 9002 --storage ./loot \
+  --admin-token admin-secret \
+  --agent-token team-a --agent-token team-b
 
 # With TLS (auto-generates a self-signed cert via openssl)
-poetry run hydrangea-server --ports 9000 --auth-token supersecret --tls-auto
+poetry run hydrangea-server \
+  --admin-port 9000 --ports 9001 \
+  --admin-token admin-secret --agent-token beacon-token --tls-auto
 
 # With your own cert/key
-poetry run hydrangea-server --ports 9000 --auth-token supersecret \
+poetry run hydrangea-server \
+  --admin-port 9000 --ports 9001 \
+  --admin-token admin-secret --agent-token beacon-token \
   --tls-cert server.crt --tls-key server.key
 ```
 

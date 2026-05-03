@@ -71,9 +71,11 @@ def _make_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
 
 
 class ClientSession:
-    def __init__(self, client_id: str, writer: asyncio.StreamWriter):
+    def __init__(self, client_id: str, writer: asyncio.StreamWriter, port: int, peer: str):
         self.client_id = client_id
         self.writer = writer
+        self.port = port
+        self.peer = peer
         self.queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=256)
         self.alive = True
         self.last_seen: float = time.time()
@@ -84,15 +86,22 @@ class Server:
     def __init__(
         self,
         host: str,
-        ports: list[int],
+        admin_port: int,
+        agent_ports: list[int],
         storage: str,
-        auth_token: str,
+        admin_token: str,
+        agent_tokens: set,
         ssl_ctx: Optional[ssl.SSLContext] = None,
     ):
         self.host = host
-        self.ports = ports
+        self.admin_port = admin_port
+        self.agent_ports: list[int] = list(agent_ports)
         self.storage = storage
-        self.auth_token = auth_token
+        self.admin_token = admin_token
+        self.agent_tokens: set = set(agent_tokens)
+        # Per-port exclusive token sets. When a port has an entry here, ONLY those
+        # tokens are accepted on that port (global agent_tokens are bypassed).
+        self.port_token_map: Dict[int, set] = {}
         self.ssl_ctx = ssl_ctx
         os.makedirs(self.storage, exist_ok=True)
         self.clients: Dict[str, ClientSession] = {}
@@ -105,55 +114,100 @@ class Server:
         logging.getLogger().addHandler(self.log_buffer)
 
     async def start(self):
+        agent_ports_str = ", ".join(f":{p}" for p in self.agent_ports)
         log.info(
-            f"Starting on {self.host}:{', '.join(map(str, self.ports))}  storage={self.storage}"
+            f"Starting on {self.host}  admin=:{self.admin_port}"
+            f"  agents={agent_ports_str}  storage={self.storage}"
         )
-        for port in self.ports:
-            def _make_handler(p: int):
-                async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
-                    await self.handle_connection(r, w, p)
-                return _h
+
+        def _make_admin_handler(p: int):
+            async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
+                await self.handle_admin_port(r, w, p)
+            return _h
+
+        def _make_agent_handler(p: int):
+            async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
+                await self.handle_agent_port(r, w, p)
+            return _h
+
+        srv = await asyncio.start_server(
+            _make_admin_handler(self.admin_port), self.host, self.admin_port, ssl=self.ssl_ctx
+        )
+        self.servers.append(srv)
+        log.info(f"Admin port listening on :{self.admin_port}")
+
+        for port in self.agent_ports:
             srv = await asyncio.start_server(
-                _make_handler(port), self.host, port, ssl=self.ssl_ctx
+                _make_agent_handler(port), self.host, port, ssl=self.ssl_ctx
             )
             self.servers.append(srv)
-            sockets = ", ".join(str(s.getsockname()) for s in srv.sockets or [])
-            log.info(f"Listening on {sockets}")
+            log.info(f"Agent port listening on :{port}")
+
         asyncio.create_task(self._keepalive_loop())
         await asyncio.gather(*(srv.serve_forever() for srv in self.servers))
 
-    async def handle_connection(
+    async def handle_admin_port(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int
     ):
         peer = writer.get_extra_info("peername")
         try:
             header, payload = await read_frame(reader)
         except Exception as e:
-            log.warning(f":{port} {peer} failed initial frame: {e}")
+            log.warning(f":{port} (admin) {peer} failed initial frame: {e}")
             writer.close()
             await writer.wait_closed()
             return
 
-        msg_type = header.get("type")
-        token = header.get("token")
-        if token != self.auth_token:
-            log.warning(f":{port} auth failed from {peer}")
+        if header.get("token") != self.admin_token:
+            log.warning(f":{port} (admin) auth failed from {peer}")
             await write_frame(writer, {"type": "ERROR", "error": "auth_failed"})
             writer.close()
             await writer.wait_closed()
             return
 
-        if msg_type == "REGISTER":
-            await self.handle_client(reader, writer, header, port)
-        elif msg_type == "ADMIN":
-            log.info(f":{port} admin from {peer}  action={header.get('action')}")
-            await self.handle_admin(reader, writer, header, payload)
-        else:
-            await write_frame(
-                writer, {"type": "ERROR", "error": "invalid_initial_type"}
+        if header.get("type") != "ADMIN":
+            log.warning(
+                f":{port} (admin) rejected type={header.get('type')!r} from {peer} — use an agent port"
             )
+            await write_frame(writer, {"type": "ERROR", "error": "wrong_port"})
             writer.close()
             await writer.wait_closed()
+            return
+
+        log.info(f":{port} (admin) {peer}  action={header.get('action')}")
+        await self.handle_admin(reader, writer, header, payload)
+
+    async def handle_agent_port(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int
+    ):
+        peer = writer.get_extra_info("peername")
+        try:
+            header, payload = await read_frame(reader)
+        except Exception as e:
+            log.warning(f":{port} (agent) {peer} failed initial frame: {e}")
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        port_exclusive = self.port_token_map.get(port)
+        allowed = port_exclusive if port_exclusive is not None else self.agent_tokens
+        if header.get("token") not in allowed:
+            log.warning(f":{port} (agent) auth failed from {peer}")
+            await write_frame(writer, {"type": "ERROR", "error": "auth_failed"})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if header.get("type") != "REGISTER":
+            log.warning(
+                f":{port} (agent) rejected type={header.get('type')!r} from {peer} — use the admin port"
+            )
+            await write_frame(writer, {"type": "ERROR", "error": "wrong_port"})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        await self.handle_client(reader, writer, header, port)
 
     async def handle_client(
         self,
@@ -188,10 +242,11 @@ class Server:
             except Exception:
                 pass
 
-        session = ClientSession(client_id, writer)
+        peer_str = f"{peer[0]}:{peer[1]}" if peer else "unknown"
+        session = ClientSession(client_id, writer, port, peer_str)
         self.clients[client_id] = session
         await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
-        log.info(f":{port} client registered: {client_id} from {peer}")
+        log.info(f":{port} client registered: {client_id} from {peer_str}")
 
         # Start a task to pump orders to client; store ref for clean cancellation
         session.pump_task = asyncio.create_task(self._pump_orders(session))
@@ -408,6 +463,9 @@ class Server:
             "reverse_shell",
             "port_forward",
             "server_exec",
+            "add_agent_token",
+            "add_agent_port",
+            "server_config",
         }:
             await write_frame(
                 writer, {"type": "ERROR", "error": "unknown_admin_action"}
@@ -417,9 +475,13 @@ class Server:
             return
 
         if action == "clients":
-            await write_frame(
-                writer, {"type": "CLIENTS", "clients": list(self.clients.keys())}
-            )
+            await write_frame(writer, {
+                "type": "CLIENTS",
+                "clients": [
+                    {"id": s.client_id, "port": s.port, "peer": s.peer}
+                    for s in self.clients.values()
+                ],
+            })
             writer.close()
             await writer.wait_closed()
             return
@@ -501,6 +563,96 @@ class Server:
             except Exception as exc:
                 log.exception(f"server_exec failed: {exc}")
                 await write_frame(writer, {"type": "ERROR", "error": str(exc)})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "add_agent_token":
+            token = header.get("agent_token")
+            if not token:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_token"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            bind_port = header.get("port")
+            if bind_port is not None:
+                bind_port = int(bind_port)
+                if bind_port not in self.agent_ports:
+                    await write_frame(writer, {"type": "ERROR", "error": "unknown_agent_port"})
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                if bind_port not in self.port_token_map:
+                    self.port_token_map[bind_port] = set()
+                self.port_token_map[bind_port].add(token)
+                log.info(f"Token added to :{bind_port} exclusive set")
+                await write_frame(writer, {"type": "OK", "scope": "port", "port": bind_port})
+            else:
+                self.agent_tokens.add(token)
+                log.info("Token added to global agent token set")
+                await write_frame(writer, {"type": "OK", "scope": "global"})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "add_agent_port":
+            new_port = header.get("port")
+            if not new_port:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_port"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            new_port = int(new_port)
+            if new_port == self.admin_port or new_port in self.agent_ports:
+                await write_frame(writer, {"type": "ERROR", "error": "port_already_configured"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            bind_token = header.get("agent_token")
+            try:
+                def _make_dyn_handler(p: int):
+                    async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
+                        await self.handle_agent_port(r, w, p)
+                    return _h
+                srv = await asyncio.start_server(
+                    _make_dyn_handler(new_port), self.host, new_port, ssl=self.ssl_ctx
+                )
+                self.servers.append(srv)
+                asyncio.create_task(srv.serve_forever())
+                self.agent_ports.append(new_port)
+                if bind_token:
+                    self.port_token_map[new_port] = {bind_token}
+                    binding = "exclusive"
+                    log.info(f"Agent port :{new_port} opened (exclusive token binding)")
+                else:
+                    binding = "global"
+                    log.info(f"Agent port :{new_port} opened (global tokens)")
+                await write_frame(writer, {
+                    "type": "OK",
+                    "port": new_port,
+                    "token_binding": binding,
+                })
+            except OSError as exc:
+                log.warning(f"Failed to open agent port :{new_port}: {exc}")
+                await write_frame(writer, {"type": "ERROR", "error": str(exc)})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "server_config":
+            def _mask(t: str) -> str:
+                return t[:3] + "***" if len(t) > 3 else "***"
+            config = {
+                "type": "SERVER_CONFIG",
+                "admin_port": self.admin_port,
+                "agent_ports": self.agent_ports,
+                "global_tokens": sorted(_mask(t) for t in self.agent_tokens),
+                "port_bindings": {
+                    str(p): sorted(_mask(t) for t in tokens)
+                    for p, tokens in self.port_token_map.items()
+                },
+            }
+            await write_frame(writer, config)
             writer.close()
             await writer.wait_closed()
             return
@@ -739,20 +891,28 @@ async def amain():
     ap = argparse.ArgumentParser(description="Hydrangea server")
     ap.add_argument("--host", default="0.0.0.0", help="Bind address")
     ap.add_argument(
-        "--ports",
-        default=["9000"],
-        nargs="+",
-        type=int,
-        help="Ports to listen on (space-separated)",
+        "--admin-port", type=int, required=True,
+        help="Port for controller (admin) connections",
     )
     ap.add_argument(
-        "--storage",
-        default="./server_storage",
+        "--ports", nargs="+", type=int, required=True,
+        help="Port(s) for agent connections (space-separated)",
+    )
+    ap.add_argument(
+        "--storage", default="./server_storage",
         help="Directory to store incoming files",
     )
-    ap.add_argument("--auth-token", required=True, help="Shared auth token")
-    ap.add_argument("--tls-cert",  default=None, metavar="PEM", help="TLS certificate file")
-    ap.add_argument("--tls-key",   default=None, metavar="PEM", help="TLS private key file")
+    ap.add_argument(
+        "--admin-token", required=True,
+        help="Auth token for controller connections",
+    )
+    ap.add_argument(
+        "--agent-token", action="append", dest="agent_tokens", metavar="TOKEN",
+        default=[],
+        help="Allowed auth token for agent connections (repeatable); omit to configure at runtime",
+    )
+    ap.add_argument("--tls-cert", default=None, metavar="PEM", help="TLS certificate file")
+    ap.add_argument("--tls-key",  default=None, metavar="PEM", help="TLS private key file")
     ap.add_argument(
         "--tls-auto", action="store_true",
         help="Auto-generate a self-signed TLS cert (requires openssl in PATH)",
@@ -783,19 +943,30 @@ async def amain():
 
     # ── banner ────────────────────────────────────────────────────────────────
     print(art)
-    print(f"  Version      {__version__}")
-    print(f"  Host         {args.host}")
-    print(f"  Ports        {', '.join(map(str, args.ports))}")
-    print(f"  Storage      {args.storage}")
+    print(f"  Version        {__version__}")
+    print(f"  Host           {args.host}")
+    print(f"  Admin port     :{args.admin_port}  (controller only)")
+    print(f"  Agent ports    {', '.join(f':{p}' for p in args.ports)}")
+    token_note = f"{len(args.agent_tokens)} configured" if args.agent_tokens else "none — add via controller before agents connect"
+    print(f"  Agent tokens   {token_note}")
+    print(f"  Storage        {args.storage}")
     if ssl_ctx:
-        print(f"  TLS          enabled")
-        print(f"  Cert         {cert_path}")
-        print(f"  Fingerprint  {tls_fingerprint}")
+        print(f"  TLS            enabled")
+        print(f"  Cert           {cert_path}")
+        print(f"  Fingerprint    {tls_fingerprint}")
     else:
-        print(f"  TLS          disabled  (pass --tls-auto or --tls-cert/--tls-key to enable)")
+        print(f"  TLS            disabled  (pass --tls-auto or --tls-cert/--tls-key to enable)")
     print()
 
-    srv = Server(args.host, args.ports, args.storage, args.auth_token, ssl_ctx=ssl_ctx)
+    srv = Server(
+        args.host,
+        args.admin_port,
+        args.ports,
+        args.storage,
+        args.admin_token,
+        set(args.agent_tokens),
+        ssl_ctx=ssl_ctx,
+    )
     await srv.start()
 
 
