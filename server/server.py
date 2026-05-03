@@ -710,7 +710,9 @@ class Server:
                 port_set.discard(token)
                 if not port_set:
                     del self.port_token_map[rm_port]
-                    log.info(f"Token removed from :{rm_port} exclusive set (now uses global tokens)")
+                    log.info(
+                        f"Token removed from :{rm_port} exclusive set (now uses global tokens)"
+                    )
                 else:
                     log.info(f"Token removed from :{rm_port} exclusive set")
                 await write_frame(writer, {"type": "OK", "scope": "port", "port": rm_port})
@@ -767,11 +769,14 @@ class Server:
             self.agent_ports.remove(rm_port)
             self.port_token_map.pop(rm_port, None)
             log.info(f"Agent port :{rm_port} closed (evicted {len(evicted)} client(s))")
-            await write_frame(writer, {
-                "type": "OK",
-                "port": rm_port,
-                "evicted_clients": evicted,
-            })
+            await write_frame(
+                writer,
+                {
+                    "type": "OK",
+                    "port": rm_port,
+                    "evicted_clients": evicted,
+                },
+            )
             writer.close()
             await writer.wait_closed()
             return

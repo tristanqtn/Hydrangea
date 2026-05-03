@@ -294,28 +294,28 @@ class UI:
             ),
         ]
         descs: dict[str, str] = {
-            "clients":            "List connected clients",
-            "use":                "Set active client context",
-            "unuse":              "Clear active client context",
-            "ping":               "Ping a client",
-            "session":            "Get session info from client",
-            "list":               "List directory on client",
-            "pull":               "Pull file from client to server",
-            "push":               "Push local file to client",
-            "exec":               "Run a command on client",
-            "reverse-shell":      "Start a reverse shell",
-            "port-forward":       "Upload and run Ligolo agent",
-            "build-client":       "Compile Go clients",
-            "serve-files":        "Serve a directory over HTTP (for agent retrieval)",
-            "stop-serve":         "Stop the running HTTP file server",
-            "server-status":      "Server health and recent logs",
-            "server-config":      "Show port / token configuration",
-            "server-exec":        "Run a command on the server host",
-            "add-agent-token":    "Register a new agent token (global or port-bound)",
-            "add-agent-port":     "Open a new agent listening port at runtime",
+            "clients": "List connected clients",
+            "use": "Set active client context",
+            "unuse": "Clear active client context",
+            "ping": "Ping a client",
+            "session": "Get session info from client",
+            "list": "List directory on client",
+            "pull": "Pull file from client to server",
+            "push": "Push local file to client",
+            "exec": "Run a command on client",
+            "reverse-shell": "Start a reverse shell",
+            "port-forward": "Upload and run Ligolo agent",
+            "build-client": "Compile Go clients",
+            "serve-files": "Serve a directory over HTTP (for agent retrieval)",
+            "stop-serve": "Stop the running HTTP file server",
+            "server-status": "Server health and recent logs",
+            "server-config": "Show port / token configuration",
+            "server-exec": "Run a command on the server host",
+            "add-agent-token": "Register a new agent token (global or port-bound)",
+            "add-agent-port": "Open a new agent listening port at runtime",
             "remove-agent-token": "Remove an agent token (global or port-exclusive)",
-            "remove-agent-port":  "Close an agent listening port and evict its beacons",
-            "local":              "Run a command locally (controller machine)",
+            "remove-agent-port": "Close an agent listening port and evict its beacons",
+            "local": "Run a command locally (controller machine)",
         }
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         t.add_column(style="accent", no_wrap=True)
@@ -386,11 +386,11 @@ def print_clients(ui: UI, clients: list[Any]) -> None:
     t.add_column("status")
     for entry in clients:
         if isinstance(entry, dict):
-            cid      = entry.get("id", "?")
-            port     = f":{entry.get('port', '?')}"
-            user     = entry.get("user", "?")
+            cid = entry.get("id", "?")
+            port = f":{entry.get('port', '?')}"
+            user = entry.get("user", "?")
             hostname = entry.get("hostname", "?")
-            peer     = entry.get("peer", "?")
+            peer = entry.get("peer", "?")
         else:
             cid, port, user, hostname, peer = str(entry), "?", "?", "?", "?"
         t.add_row(cid, port, user, hostname, peer, "[ok]● online[/ok]")

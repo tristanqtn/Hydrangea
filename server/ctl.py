@@ -10,7 +10,6 @@ import shlex
 import socket
 import ssl
 import subprocess
-import sys
 import threading
 from datetime import datetime
 from typing import Any
@@ -246,7 +245,9 @@ def build_repl_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Arg
     sp = sub.add_parser("remove-agent-token", help="Remove an agent auth token from the server")
     sp.add_argument("--token", required=True, help="Token to remove")
     sp.add_argument(
-        "--port", type=int, default=None,
+        "--port",
+        type=int,
+        default=None,
         help="Remove from port-exclusive set (default: remove from global set)",
     )
 
@@ -662,11 +663,13 @@ async def run_repl(args) -> None:
             continue
 
         if cmd == "remove-agent-token":
-            resp, _ = await _send({
-                "action": "remove_agent_token",
-                "agent_token": ns.token,
-                "port": ns.port,
-            })
+            resp, _ = await _send(
+                {
+                    "action": "remove_agent_token",
+                    "agent_token": ns.token,
+                    "port": ns.port,
+                }
+            )
             if resp.get("type") == "OK":
                 if resp.get("scope") == "port":
                     ui.success(f"Token removed from :{resp.get('port')} exclusive set")
@@ -706,6 +709,7 @@ async def run_repl(args) -> None:
             def _make_handler(d: str):
                 def _h(*args, **kwargs):
                     return _SilentFileHandler(*args, directory=d, **kwargs)
+
                 return _h
 
             try:
