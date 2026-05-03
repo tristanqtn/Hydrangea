@@ -8,7 +8,7 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import HTML
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.styles import Style
@@ -89,6 +89,51 @@ def human_time(epoch: Any) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Context-aware completer
+# ---------------------------------------------------------------------------
+
+
+class _HydrangeaCompleter(Completer):
+    """Completes command names at position 0, agent IDs after 'use'/'unuse'/--client."""
+
+    def __init__(self, commands: list[str]) -> None:
+        self._commands = sorted(commands)
+        self.agent_ids: list[str] = []
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor
+        words = text.split()
+        word = document.get_word_before_cursor(WORD=True)
+
+        # Position 0: complete command names
+        if not words or (len(words) == 1 and not text.endswith(" ")):
+            for cmd in self._commands:
+                if cmd.startswith(word):
+                    yield Completion(cmd, start_position=-len(word))
+            return
+
+        first = words[0]
+
+        # After 'use' or 'unuse': complete agent IDs at position 1 only
+        if first in ("use", "unuse"):
+            at_second = (text.endswith(" ") and len(words) == 1) or (
+                not text.endswith(" ") and len(words) == 2
+            )
+            if at_second:
+                for agent_id in self.agent_ids:
+                    if agent_id.startswith(word):
+                        yield Completion(agent_id, start_position=-len(word))
+            return
+
+        # After '--client': complete agent IDs
+        prev = words[-1] if text.endswith(" ") else (words[-2] if len(words) >= 2 else "")
+        if prev == "--client":
+            for agent_id in self.agent_ids:
+                if agent_id.startswith(word):
+                    yield Completion(agent_id, start_position=-len(word))
+
+
+# ---------------------------------------------------------------------------
 # UI class
 # ---------------------------------------------------------------------------
 
@@ -107,13 +152,17 @@ class UI:
         self._show_banner = show_banner
         self.quiet = quiet
         hist_path = os.path.expanduser("~/.hydrangea_history")
+        self._completer = _HydrangeaCompleter(commands or [])
         self._session: PromptSession = PromptSession(
             history=FileHistory(hist_path),
             auto_suggest=AutoSuggestFromHistory(),
-            completer=WordCompleter(commands or [], sentence=True),
+            completer=self._completer,
             complete_while_typing=False,
             style=_PT_STYLE,
         )
+
+    def update_agents(self, ids: list[str]) -> None:
+        self._completer.agent_ids = sorted(ids)
 
     # -- colour shortcut (used by go_builder and ctl call-sites) -------------
 
@@ -229,7 +278,7 @@ class UI:
             ("Client", ["clients", "use", "unuse", "ping", "session"]),
             ("Files", ["list", "pull", "push"]),
             ("Exec", ["exec", "reverse-shell", "port-forward"]),
-            ("Build", ["build-client"]),
+            ("Build", ["build-client", "serve-files", "stop-serve"]),
             (
                 "Server",
                 [
@@ -238,29 +287,35 @@ class UI:
                     "server-exec",
                     "add-agent-token",
                     "add-agent-port",
+                    "remove-agent-token",
+                    "remove-agent-port",
                     "local",
                 ],
             ),
         ]
         descs: dict[str, str] = {
-            "clients": "List connected clients",
-            "use": "Set active client context",
-            "unuse": "Clear active client context",
-            "ping": "Ping a client",
-            "session": "Get session info from client",
-            "list": "List directory on client",
-            "pull": "Pull file from client to server",
-            "push": "Push local file to client",
-            "exec": "Run a command on client",
-            "reverse-shell": "Start a reverse shell",
-            "port-forward": "Upload and run Ligolo agent",
-            "build-client": "Compile Go clients",
-            "server-status": "Server health and recent logs",
-            "server-config": "Show port / token configuration",
-            "server-exec": "Run a command on the server host",
-            "add-agent-token": "Register a new agent token (global or port-bound)",
-            "add-agent-port": "Open a new agent listening port at runtime",
-            "local": "Run a command locally (controller machine)",
+            "clients":            "List connected clients",
+            "use":                "Set active client context",
+            "unuse":              "Clear active client context",
+            "ping":               "Ping a client",
+            "session":            "Get session info from client",
+            "list":               "List directory on client",
+            "pull":               "Pull file from client to server",
+            "push":               "Push local file to client",
+            "exec":               "Run a command on client",
+            "reverse-shell":      "Start a reverse shell",
+            "port-forward":       "Upload and run Ligolo agent",
+            "build-client":       "Compile Go clients",
+            "serve-files":        "Serve a directory over HTTP (for agent retrieval)",
+            "stop-serve":         "Stop the running HTTP file server",
+            "server-status":      "Server health and recent logs",
+            "server-config":      "Show port / token configuration",
+            "server-exec":        "Run a command on the server host",
+            "add-agent-token":    "Register a new agent token (global or port-bound)",
+            "add-agent-port":     "Open a new agent listening port at runtime",
+            "remove-agent-token": "Remove an agent token (global or port-exclusive)",
+            "remove-agent-port":  "Close an agent listening port and evict its beacons",
+            "local":              "Run a command locally (controller machine)",
         }
         t = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
         t.add_column(style="accent", no_wrap=True)
@@ -324,17 +379,21 @@ def print_clients(ui: UI, clients: list[Any]) -> None:
         return
     t = Table(box=box.SIMPLE, show_header=True, header_style="muted", padding=(0, 1))
     t.add_column("id", style="info")
-    t.add_column("srv port", style="accent", no_wrap=True)
+    t.add_column("port", style="accent", no_wrap=True)
+    t.add_column("user", no_wrap=True)
+    t.add_column("hostname", style="muted", no_wrap=True)
     t.add_column("beacon addr", style="muted", no_wrap=True)
     t.add_column("status")
     for entry in clients:
         if isinstance(entry, dict):
-            cid = entry.get("id", "?")
-            port = f":{entry.get('port', '?')}"
-            peer = entry.get("peer", "?")
+            cid      = entry.get("id", "?")
+            port     = f":{entry.get('port', '?')}"
+            user     = entry.get("user", "?")
+            hostname = entry.get("hostname", "?")
+            peer     = entry.get("peer", "?")
         else:
-            cid, port, peer = str(entry), "?", "?"
-        t.add_row(cid, port, peer, "[ok]● online[/ok]")
+            cid, port, user, hostname, peer = str(entry), "?", "?", "?", "?"
+        t.add_row(cid, port, user, hostname, peer, "[ok]● online[/ok]")
     ui._con.print()
     ui._con.print(t)
 
@@ -465,10 +524,16 @@ def print_server_config(ui: UI, resp: dict) -> None:
 
     agent_ports = resp.get("agent_ports", [])
     bound_ports = set(int(p) for p in resp.get("port_bindings", {}).keys())
+    startup_ports = set(resp.get("startup_agent_ports", []))
     port_cells = []
     for p in agent_ports:
-        marker = "  [muted](exclusive)[/muted]" if p in bound_ports else ""
-        port_cells.append(f":{p}{marker}")
+        markers = []
+        if p in startup_ports:
+            markers.append("[muted](startup)[/muted]")
+        if p in bound_ports:
+            markers.append("[muted](exclusive)[/muted]")
+        suffix = "  " + "  ".join(markers) if markers else ""
+        port_cells.append(f":{p}{suffix}")
     t.add_row("agent ports", "\n".join(port_cells) if port_cells else "[muted](none)[/muted]")
 
     global_tokens = resp.get("global_tokens", [])

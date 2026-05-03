@@ -3,12 +3,15 @@
 import argparse
 import asyncio
 import hashlib
+import http.server
 import json
 import os
 import shlex
+import socket
 import ssl
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -64,6 +67,30 @@ async def admin_send(
     writer.close()
     await writer.wait_closed()
     return resp, resp_payload
+
+
+def _get_local_ips() -> list[str]:
+    """Return all non-loopback IPv4 addresses on this machine."""
+    ips: set[str] = set()
+    try:
+        for _, _, _, _, sockaddr in socket.getaddrinfo(socket.gethostname(), None):
+            ip = sockaddr[0]
+            if not ip.startswith("127.") and ":" not in ip:
+                ips.add(ip)
+    except Exception:
+        pass
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            ips.add(s.getsockname()[0])
+    except Exception:
+        pass
+    return sorted(ips) or ["<your-ip>"]
+
+
+class _SilentFileHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):  # noqa: A002
+        pass
 
 
 class NoExitArgumentParser(argparse.ArgumentParser):
@@ -157,6 +184,18 @@ def build_repl_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Arg
         help="Bake TLS fingerprint into the client binary (implies --build-tls)",
     )
 
+    sp = sub.add_parser(
+        "serve-files",
+        help="Start an HTTP file server to share build artifacts with a target",
+    )
+    sp.add_argument("--path", required=True, help="Directory to serve")
+    sp.add_argument("--port", type=int, default=8888, help="Port to listen on (default: 8888)")
+    sp.add_argument(
+        "--interface", default="0.0.0.0", help="Interface to bind to (default: 0.0.0.0)"
+    )
+
+    sub.add_parser("stop-serve", help="Stop the running HTTP file server")
+
     # server-status (REPL)
     sub.add_parser("server-status", help="Check the server's health status")
 
@@ -204,6 +243,16 @@ def build_repl_parser() -> tuple[argparse.ArgumentParser, dict[str, argparse.Arg
         help="Bind a token exclusively to this port (optional; uses global tokens if omitted)",
     )
 
+    sp = sub.add_parser("remove-agent-token", help="Remove an agent auth token from the server")
+    sp.add_argument("--token", required=True, help="Token to remove")
+    sp.add_argument(
+        "--port", type=int, default=None,
+        help="Remove from port-exclusive set (default: remove from global set)",
+    )
+
+    sp = sub.add_parser("remove-agent-port", help="Close an agent listening port on the server")
+    sp.add_argument("--port", type=int, required=True, help="Port to close")
+
     sub.add_parser("server-config", help="Show server port and token configuration")
 
     sp = sub.add_parser("local", help="Run a local shell command")
@@ -236,6 +285,7 @@ async def run_repl(args) -> None:
     current_client: str | None = None
     session_start = datetime.now()
     command_count = 0
+    _file_server: http.server.HTTPServer | None = None
 
     # Pre-configure TLS once for the whole session
     _tls = getattr(args, "tls", False)
@@ -273,6 +323,7 @@ async def run_repl(args) -> None:
     if probe.get("type") == "ERROR":
         ui.error(f"Server rejected connection: {probe.get('error')}")
         return
+    ui.update_agents([c["id"] for c in probe.get("clients", [])])
 
     while True:
         try:
@@ -347,7 +398,9 @@ async def run_repl(args) -> None:
         if cmd == "clients":
             resp, _ = await _send({"action": "clients"})
             if resp.get("type") == "CLIENTS":
-                print_clients(ui, resp.get("clients", []))
+                client_list = resp.get("clients", [])
+                print_clients(ui, client_list)
+                ui.update_agents([c["id"] for c in client_list])
             else:
                 print_error(ui, resp)
             continue
@@ -608,6 +661,77 @@ async def run_repl(args) -> None:
             print_server_config(ui, resp)
             continue
 
+        if cmd == "remove-agent-token":
+            resp, _ = await _send({
+                "action": "remove_agent_token",
+                "agent_token": ns.token,
+                "port": ns.port,
+            })
+            if resp.get("type") == "OK":
+                if resp.get("scope") == "port":
+                    ui.success(f"Token removed from :{resp.get('port')} exclusive set")
+                else:
+                    ui.success("Token removed from global agent token set")
+            else:
+                print_error(ui, resp)
+            continue
+
+        if cmd == "remove-agent-port":
+            if ns.port == args.port:
+                ui.error(
+                    f":{ns.port} is the admin port this controller is connected to. "
+                    "Closing it would sever your connection. The server will reject this request."
+                )
+                continue
+            resp, _ = await _send({"action": "remove_agent_port", "port": ns.port})
+            if resp.get("type") == "OK":
+                evicted = resp.get("evicted_clients", [])
+                msg = f"Agent port :{ns.port} closed"
+                if evicted:
+                    msg += f"  [muted](evicted: {', '.join(evicted)})[/muted]"
+                ui.success(msg)
+            else:
+                print_error(ui, resp)
+            continue
+
+        if cmd == "serve-files":
+            if _file_server is not None:
+                ui.error("A file server is already running. Use stop-serve first.")
+                continue
+            path = os.path.abspath(ns.path)
+            if not os.path.isdir(path):
+                ui.error(f"Directory not found: {path}")
+                continue
+
+            def _make_handler(d: str):
+                def _h(*args, **kwargs):
+                    return _SilentFileHandler(*args, directory=d, **kwargs)
+                return _h
+
+            try:
+                srv = http.server.HTTPServer((ns.interface, ns.port), _make_handler(path))
+                t = threading.Thread(target=srv.serve_forever, daemon=True)
+                t.start()
+                _file_server = srv
+                ui.success(f"File server started  [muted](serving {path})[/muted]")
+                if ns.interface == "0.0.0.0":
+                    for ip in _get_local_ips():
+                        ui.info(f"  http://{ip}:{ns.port}/")
+                else:
+                    ui.info(f"  http://{ns.interface}:{ns.port}/")
+            except OSError as e:
+                ui.error(f"Failed to start file server: {e}")
+            continue
+
+        if cmd == "stop-serve":
+            if _file_server is None:
+                ui.error("No file server is running.")
+                continue
+            _file_server.shutdown()
+            _file_server = None
+            ui.success("File server stopped.")
+            continue
+
         if cmd == "local":
             try:
                 proc = subprocess.Popen(ns.local_command, shell=True)
@@ -628,35 +752,6 @@ async def run_repl(args) -> None:
         ui.error(f"Unknown command: {cmd}  (type 'help')")
 
 
-def start_server(args):
-    ui = UI(use_color=(not args.no_color), show_banner=False, quiet=args.quiet)
-    agent_port = args.port + 1
-    ui.rule(" start server ")
-    ui.kv("Admin port", f":{args.port}  (controller)")
-    ui.kv("Agent port", f":{agent_port}  (beacons)")
-    ui.rule()
-    cmd = [
-        sys.executable,
-        os.path.join(os.path.dirname(__file__), "server.py"),
-        "--host",
-        args.host,
-        "--admin-port",
-        str(args.port),
-        "--ports",
-        str(agent_port),
-        "--admin-token",
-        args.auth_token,
-        "--agent-token",
-        args.auth_token,
-    ]
-    try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        ui.success(f"Server started (PID {proc.pid}) — connect agents to :{agent_port}")
-    except Exception as e:
-        ui.error(f"Failed to start server: {e}")
-    ui.rule()
-
-
 # ---------- CLI ----------
 
 
@@ -665,8 +760,6 @@ async def amain():
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, required=True)
     ap.add_argument("--auth-token", required=True)
-    ap.add_argument("--start-srv", action="store_true", help="Start server with given parameters")
-
     # TLS flags
     ap.add_argument("--tls", action="store_true", help="Connect to server using TLS")
     ap.add_argument(
@@ -685,9 +778,6 @@ async def amain():
     # A fingerprint alone implies TLS.
     if args.tls_fingerprint:
         args.tls = True
-
-    if args.start_srv:
-        start_server(args)
 
     await run_repl(args)
 
