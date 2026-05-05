@@ -1060,6 +1060,59 @@ async def amain():
 
     args = ap.parse_args()
 
+    # Validate that agent ports do not include the admin port
+    if args.admin_port in args.ports:
+        print(f"\n  [error] Admin port :{args.admin_port} cannot be used as an agent port\n")
+        raise SystemExit(1)
+    
+    # Validate that agent ports are unique
+    if len(set(args.ports)) != len(args.ports):
+        print(f"\n  [error] Agent ports must be unique (duplicates found in {args.ports})\n")
+        raise SystemExit(1)
+    
+    # Validate that storage path is a directory (or can be created as one)
+    if os.path.exists(args.storage) and not os.path.isdir(args.storage):
+        print(f"\n  [error] Storage path {args.storage} exists and is not a directory\n")
+        raise SystemExit(1)
+    if not os.path.exists(args.storage):
+        try:
+            os.makedirs(args.storage)
+        except OSError as exc:
+            print(f"\n  [error] Failed to create storage directory {args.storage}: {exc}\n")
+            raise SystemExit(1) from exc
+        
+    # Validate TLS arguments
+    if args.tls_auto and (args.tls_cert or args.tls_key):
+        print(f"\n  [error] --tls-auto cannot be used with --tls-cert or --tls-key\n")
+        raise SystemExit(1)
+    
+    # Validate that openssl is available if --tls-auto is requested
+    if args.tls_auto:
+        if not shutil.which("openssl"):
+            print(f"\n  [error] --tls-auto requires openssl to be available in PATH\n")
+            raise SystemExit(1)
+        
+    # Validate that if one of --tls-cert/--tls-key is provided, the other is also provided
+    if (args.tls_cert and not args.tls_key) or (args.tls_key and not args.tls_cert):
+        print(f"\n  [error] Both --tls-cert and --tls-key must be provided together\n")
+        raise SystemExit(1)
+    
+    # Validate that provided TLS cert and key files exist
+    if args.tls_cert and not os.path.isfile(args.tls_cert):
+        print(f"\n  [error] TLS certificate file {args.tls_cert} does not exist\n")
+        raise SystemExit(1)
+    if args.tls_key and not os.path.isfile(args.tls_key):
+        print(f"\n  [error] TLS key file {args.tls_key} does not exist\n")
+        raise SystemExit(1)
+    
+    # Validate that provided TLS cert and key files are a valid pair
+    if args.tls_cert and args.tls_key:
+        try:
+            _make_ssl_context(args.tls_cert, args.tls_key)
+        except (ssl.SSLError, OSError) as exc:
+            print(f"\n  [error] TLS setup failed: {exc}\n")
+            raise SystemExit(1) from exc
+
     # ── TLS setup ─────────────────────────────────────────────────────────────
     ssl_ctx: ssl.SSLContext | None = None
     tls_fingerprint: str | None = None
