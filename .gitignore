@@ -3,6 +3,7 @@
 
 # Custom
 docs/
+.envrc
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
